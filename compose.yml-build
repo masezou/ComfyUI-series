@@ -128,8 +128,7 @@ services:
     #   User-specific configuration and state
     # ----------------------------------------------------------------
     volumes:
-    # - ./data/model:/opt/ComfyUI/models
-      - /mnt/models/models/ComfyUI/models:/opt/ComfyUI/models
+      - ./data/model:/opt/ComfyUI/models
       - ./data/input:/opt/ComfyUI/input
       - ./data/output:/opt/ComfyUI/output
       - ./data/custom_nodes:/opt/ComfyUI/custom_nodes
