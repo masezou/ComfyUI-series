@@ -19,7 +19,7 @@ across generations.
 
 ### GPU Generations Covered
 
--   Blackwell
+-   Blackwell (50x0 / DGX Spark)
 -   Hopper
 -   Ampere
 -   Ada
@@ -64,7 +64,14 @@ Target architecture: **linux/amd64 only**.
 
 ``` bash
 docker buildx use default
-docker buildx build   --platform linux/amd64   --build-arg COMFY_REF=master   --build-arg COMFY_CACHEBUST=$(date +%Y%m%d%H%M%S)   --tag registry.example.com/comfyui-dh:2.10.0-cu130   --cache-from type=registry,ref=registry-buildcache.example.com/buildcache/comfyui-dh:cu130   --cache-to   type=registry,ref=registry-buildcache.example.com/buildcache/comfyui-dh:cu130,mode=max   --push   -f Dockerfile.dh   .
+docker buildx build   --platform linux/amd64   --build-arg COMFY_REF=master \
+--build-arg COMFY_CACHEBUST=$(date +%Y%m%d%H%M%S) \
+--tag registry.example.com/comfyui-dh:2.10.0-cu130 \
+--cache-from type=registry,ref=registry-buildcache.example.com/buildcache/comfyui-dh:cu130 \
+--cache-to   type=registry,ref=registry-buildcache.example.com/buildcache/comfyui-dh:cu130,mode=max \
+--push \
+-f Dockerfile.dh \
+.
 ```
 
 ------------------------------------------------------------------------
@@ -78,7 +85,14 @@ docker buildx build   --platform linux/amd64   --build-arg COMFY_REF=master   --
 
 ``` bash
 docker buildx use default
-docker buildx build   --platform linux/amd64   --build-arg COMFY_REF=master   --build-arg COMFY_CACHEBUST=$(date +%Y%m%d%H%M%S)   --tag registry.example.com/comfyui-dh-cu128:2.7.0-cu128   --cache-from type=registry,ref=registry-buildcache.example.com/buildcache/comfyui-dh-cu128:cu128   --cache-to   type=registry,ref=registry-buildcache.example.com/buildcache/comfyui-dh-cu128:cu128,mode=max   --push   -f Dockerfile.dh-cu128   .
+docker buildx build   --platform linux/amd64   --build-arg COMFY_REF=master \
+--build-arg COMFY_CACHEBUST=$(date +%Y%m%d%H%M%S) \
+--tag registry.example.com/comfyui-dh-cu128:2.7.0-cu128 \
+--cache-from type=registry,ref=registry-buildcache.example.com/buildcache/comfyui-dh-cu128:cu128 \
+--cache-to   type=registry,ref=registry-buildcache.example.com/buildcache/comfyui-dh-cu128:cu128,mode=max \
+--push \
+-f Dockerfile.dh-cu128 \
+.
 ```
 
 ------------------------------------------------------------------------
@@ -92,7 +106,14 @@ docker buildx build   --platform linux/amd64   --build-arg COMFY_REF=master   --
 
 ``` bash
 docker buildx use default
-docker buildx build   --platform linux/amd64   --build-arg COMFY_REF=master   --build-arg COMFY_CACHEBUST=$(date +%Y%m%d%H%M%S)   --tag registry.example.com/comfyui-dh-legacy:2.6.0-cu126   --cache-from type=registry,ref=registry-buildcache.example.com/buildcache/comfyui-dh-legacy:cu126   --cache-to   type=registry,ref=registry-buildcache.example.com/buildcache/comfyui-dh-legacy:cu126,mode=max   --push   -f Dockerfile.dh-legacy   .
+docker buildx build   --platform linux/amd64   --build-arg COMFY_REF=master \
+--build-arg COMFY_CACHEBUST=$(date +%Y%m%d%H%M%S) \
+--tag registry.example.com/comfyui-dh-legacy:2.6.0-cu126 \
+--cache-from type=registry,ref=registry-buildcache.example.com/buildcache/comfyui-dh-legacy:cu126 \
+--cache-to   type=registry,ref=registry-buildcache.example.com/buildcache/comfyui-dh-legacy:cu126,mode=max \
+--push \
+-f Dockerfile.dh-legacy \
+.
 ```
 
 ------------------------------------------------------------------------
@@ -110,7 +131,14 @@ Target architectures: **linux/amd64 + linux/arm64**
 
 ``` bash
 docker buildx use mpbuilder
-docker buildx build   --platform linux/amd64,linux/arm64   --build-arg COMFY_REF=master   --build-arg COMFY_CACHEBUST=$(date +%Y%m%d%H%M%S)   --tag registry.example.com/comfyui-dh-nvidia:cu130   --cache-from type=registry,ref=registry-buildcache.example.com/buildcache/comfyui-dh-nvidia:cu130   --cache-to   type=registry,ref=registry-buildcache.example.com/buildcache/comfyui-dh-nvidia:cu130,mode=max   --push   -f Dockerfile.dh-nvidia   .
+docker buildx build   --platform linux/amd64,linux/arm64   --build-arg COMFY_REF=master \
+--build-arg COMFY_CACHEBUST=$(date +%Y%m%d%H%M%S) \
+--tag registry.example.com/comfyui-dh-nvidia:cu130 \
+--cache-from type=registry,ref=registry-buildcache.example.com/buildcache/comfyui-dh-nvidia:cu130 \
+--cache-to   type=registry,ref=registry-buildcache.example.com/buildcache/comfyui-dh-nvidia:cu130,mode=max \
+--push \
+-f Dockerfile.dh-nvidia \
+.
 ```
 
 ------------------------------------------------------------------------
