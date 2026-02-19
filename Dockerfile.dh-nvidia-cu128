@@ -45,6 +45,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ffmpeg \
       libgl1 libglib2.0-0 \
       git-lfs \
+      python3-dev build-essential \
     && git lfs install --system \
     && rm -rf /var/lib/apt/lists/*
 
