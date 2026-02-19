@@ -1,0 +1,150 @@
+# ------------------------------------------------------------------
+# Docker Compose configuration for ComfyUI
+#
+# Design goals:
+# - Build image from local Dockerfile (Docker Hub or NGC variant)
+# - Enable full GPU access
+# - Persist models and user data outside container
+# - Provide stable restart behavior
+# - Enable health monitoring
+# ------------------------------------------------------------------
+
+services:
+  comfyui:
+
+    # ----------------------------------------------------------------
+    # Build configuration
+    # - context: build directory
+    # - dockerfile: choose Dockerfile.dh or Dockerfile.ngc
+    # - COMFY_REF: git branch/tag passed to Dockerfile
+    # ----------------------------------------------------------------
+    build:
+      context: .
+      # Only for amd64
+      dockerfile: Dockerfile.dh
+      # dockerfile: Dockerfile.dh-cu128
+
+      # works on arm64 and amd64
+      # dockerfile: Dockerfile.dh-nvidia
+      # dockerfile: Dockerfile.dh-nvidia-cu128
+      # dockerfile: Dockerfile.ngc
+      # dockerfile: Dockerfile.ngc-cu128
+
+      # Doesn't work on Blackwell
+      # dockerfile: Dockerfile.dh-legacy
+      # dockerfile: Dockerfile.dh-nvidia-legacy
+      # dockerfile: Dockerfile.ngc-legacy
+
+      args:
+        COMFY_REF: master
+
+    # ----------------------------------------------------------------
+    # Image tag for the locally built image
+    # (This sets the resulting image name/tag after build)
+    # ----------------------------------------------------------------
+    image: registry-dev.slow-fire.net:6443/comfyui-dh:2.10.0-cu130
+    # image: registry-dev.slow-fire.net:6443/comfyui-dh-cu128:2.7.0-cu128
+
+    # works on arm64 and amd64
+    # image: registry-dev.slow-fire.net:6443/comfyui-dh-nvidia:cu130
+    # image: registry-dev.slow-fire.net:6443/comfyui-dh-nvidia:cu128
+    # image: registry-dev.slow-fire.net:6443/comfyui-ngc:25.11
+    # image: registry-dev.slow-fire.net:6443/comfyui-ngc:25.03
+
+    # Doesn't work on Blackwell
+    # image: registry-dev.slow-fire.net:6443/comfyui-dh-legacy:2.6.0-cu126
+    # image: registry-dev.slow-fire.net:6443/comfyui-dh-nvidia:cu126
+    # image: registry-dev.slow-fire.net:6443/comfyui-ngc:24.12
+
+    # Container name and restart policy
+    container_name: comfyui
+    restart: unless-stopped
+
+    # ----------------------------------------------------------------
+    # Port mapping
+    # - Expose ComfyUI web interface on host port 8188
+    # ----------------------------------------------------------------
+    ports:
+      - "8188:8188"
+
+    # ----------------------------------------------------------------
+    # IPC mode
+    # Required for some PyTorch / CUDA shared memory operations.
+    # Using host IPC avoids shared memory size limitations.
+    # ----------------------------------------------------------------
+    ipc: host
+
+    # ----------------------------------------------------------------
+    # Resource limits
+    # memlock: allow unlimited locked memory (required for CUDA/NCCL stability)
+    # stack: increase stack size for deep model execution graphs
+    # ----------------------------------------------------------------
+    ulimits:
+      memlock: -1
+      stack: 67108864
+
+    # ----------------------------------------------------------------
+    # Environment variables
+    #
+    # NVIDIA_VISIBLE_DEVICES:
+    #   Controls which GPUs are exposed to container
+    #
+    # NVIDIA_DRIVER_CAPABILITIES:
+    #   Enables compute, utility, and video features
+    #
+    # PYTHONUNBUFFERED:
+    #   Ensures real-time log output
+    #
+    # COMFY_ARGS:
+    #   Additional CLI flags passed to ComfyUI main.py
+    #   (space-separated string; parsed safely inside container)
+    # ----------------------------------------------------------------
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility,video"
+      PYTHONUNBUFFERED: "1"
+      COMFY_ARGS: "--use-sage-attention"
+
+    # ----------------------------------------------------------------
+    # GPU access (Docker 19.03+)
+    # Grants full GPU access to container
+    # ----------------------------------------------------------------
+    gpus: all
+
+    # ----------------------------------------------------------------
+    # Persistent volumes
+    #
+    # models:
+    #   External model storage (large files kept outside container)
+    #
+    # input/output:
+    #   Workflow I/O persistence
+    #
+    # custom_nodes:
+    #   Custom extensions/plugins
+    #
+    # user:
+    #   User-specific configuration and state
+    # ----------------------------------------------------------------
+    volumes:
+      - ./data/model:/opt/ComfyUI/models
+      - ./data/input:/opt/ComfyUI/input
+      - ./data/output:/opt/ComfyUI/output
+      - ./data/custom_nodes:/opt/ComfyUI/custom_nodes
+      - ./data/user:/opt/ComfyUI/user
+
+    # ----------------------------------------------------------------
+    # Health check
+    #
+    # Periodically verify that the web UI is reachable.
+    # Container will be marked unhealthy if HTTP endpoint fails.
+    #
+    # interval: check every 30 seconds
+    # timeout: fail after 5 seconds
+    # retries: mark unhealthy after 10 failures
+    # ----------------------------------------------------------------
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8188/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
