@@ -149,7 +149,7 @@ These builds use official NVIDIA NGC PyTorch containers.
 
 ------------------------------------------------------------------------
 
-## ⚠ NGC Access Requirement
+## ⚠️  NGC Access Requirement
 
 Images based on **NVIDIA NGC (`nvcr.io`)** require an NVIDIA NGC
 account.
