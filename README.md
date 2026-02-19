@@ -146,6 +146,7 @@ docker buildx build   --platform linux/amd64,linux/arm64   --build-arg COMFY_REF
 # 3) NGC Base (Multi-Arch)
 
 These builds use official NVIDIA NGC PyTorch containers.
+This is not support AUDIO because NGC image is not included torchaudio.
 
 ------------------------------------------------------------------------
 
