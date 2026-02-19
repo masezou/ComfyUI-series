@@ -103,6 +103,7 @@ services:
       NVIDIA_VISIBLE_DEVICES: "all"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility,video"
       PYTHONUNBUFFERED: "1"
+      TRITON_CACHE_DIR: "/opt/venv/.cache/triton"
       COMFY_ARGS: "--use-sage-attention"
 
     # ----------------------------------------------------------------
@@ -127,11 +128,13 @@ services:
     #   User-specific configuration and state
     # ----------------------------------------------------------------
     volumes:
-      - ./data/model:/opt/ComfyUI/models
+    # - ./data/model:/opt/ComfyUI/models
+      - /mnt/models/models/ComfyUI/models:/opt/ComfyUI/models
       - ./data/input:/opt/ComfyUI/input
       - ./data/output:/opt/ComfyUI/output
       - ./data/custom_nodes:/opt/ComfyUI/custom_nodes
       - ./data/user:/opt/ComfyUI/user
+      - ./data/triton-cache:/opt/venv/.cache/triton
 
     # ----------------------------------------------------------------
     # Health check

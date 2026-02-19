@@ -27,19 +27,19 @@ services:
     #   from the private registry only requires authentication to THAT registry.
     # ----------------------------------------------------------------
     # Only for amd64
-    image: comfyui-dh:2.10.0-cu130
-    # image: comfyui-dh-cu128:2.7.0-cu128
+    image: registry-dev.slow-fire.net:6443/comfyui-dh:2.10.0-cu130
+    # image: registry-dev.slow-fire.net:6443/comfyui-dh-cu128:2.7.0-cu128
 
     # works on arm64 and amd64
-    # image: comfyui-dh-nvidia:cu130
-    # image: comfyui-dh-nvidia:cu128
-    # image: comfyui-ngc:25.11
-    # image: comfyui-ngc:25.03
+    # image: registry-dev.slow-fire.net:6443/comfyui-dh-nvidia:cu130
+    # image: registry-dev.slow-fire.net:6443/comfyui-dh-nvidia:cu128
+    # image: registry-dev.slow-fire.net:6443/comfyui-ngc:25.11
+    # image: registry-dev.slow-fire.net:6443/comfyui-ngc:25.03
 
     # Doesn't work on Blackwell
-    # image: comfyui-dh-legacy:2.6.0-cu126
-    # image: comfyui-dh-nvidia:cu126
-    # image: comfyui-ngc:24.12
+    # image: registry-dev.slow-fire.net:6443/comfyui-dh-legacy:2.6.0-cu126
+    # image: registry-dev.slow-fire.net:6443/comfyui-dh-nvidia:cu126
+    # image: registry-dev.slow-fire.net:6443/comfyui-ngc:24.12
 
     # Container name and restart policy
     container_name: comfyui
@@ -88,6 +88,7 @@ services:
       NVIDIA_VISIBLE_DEVICES: "all"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility,video"
       PYTHONUNBUFFERED: "1"
+      TRITON_CACHE_DIR: "/opt/venv/.cache/triton"
       COMFY_ARGS: "--use-sage-attention"
 
     # ----------------------------------------------------------------
@@ -112,11 +113,13 @@ services:
     #   User-specific configuration and state
     # ----------------------------------------------------------------
     volumes:
-      - ./data/model:/opt/ComfyUI/models
+    # - ./data/model:/opt/ComfyUI/models
+      - /mnt/models/models/ComfyUI/models:/opt/ComfyUI/models
       - ./data/input:/opt/ComfyUI/input
       - ./data/output:/opt/ComfyUI/output
       - ./data/custom_nodes:/opt/ComfyUI/custom_nodes
       - ./data/user:/opt/ComfyUI/user
+      - ./data/triton-cache:/opt/venv/.cache/triton
 
     # ----------------------------------------------------------------
     # Health check

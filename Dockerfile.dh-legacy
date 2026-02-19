@@ -103,6 +103,10 @@ ENV PATH="/opt/venv/bin:${PATH}"
 ENV VIRTUAL_ENV=/opt/venv
 ENV PYTHONUNBUFFERED=1
 
+# Optional:
+# Fix Triton cache location to reduce repeated JIT work across restarts.
+ENV TRITON_CACHE_DIR=/opt/venv/.cache/triton
+
 # Defaults (override via compose env if needed)
 ENV COMFY_LISTEN=0.0.0.0
 ENV COMFY_PORT=8188
