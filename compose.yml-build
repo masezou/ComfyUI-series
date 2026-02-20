@@ -1,12 +1,19 @@
 # ------------------------------------------------------------------
-# Docker Compose configuration for ComfyUI
+# Docker Compose configuration for ComfyUI (prebuilt image from registry)
 #
 # Design goals:
-# - Build image from local Dockerfile (Docker Hub or NGC variant)
-# - Enable full GPU access
+# - Pull a prebuilt ComfyUI image from a private registry (no local build)
+# - Allow easy switching between multiple image flavors (CUDA / NGC / ROCm)
+# - Enable full GPU access (NVIDIA via CDI; ROCm via /dev/kfd + /dev/dri)
 # - Persist models and user data outside container
 # - Provide stable restart behavior
 # - Enable health monitoring
+#
+# Notes:
+# - This compose.yml is written for Docker Compose v2.x.
+# - NVIDIA GPU access uses: `gpus: all` + NVIDIA Container Toolkit.
+# - ROCm GPU access uses: `devices` + `group_add` + (optionally) `ipc: host`.
+#   ROCm requires Linux hosts with AMDGPU/ROCm runtime on the host.
 # ------------------------------------------------------------------
 
 services:
@@ -14,47 +21,65 @@ services:
 
     # ----------------------------------------------------------------
     # Build configuration
-    # - context: build directory
-    # - dockerfile: choose Dockerfile.dh or Dockerfile.ngc
-    # - COMFY_REF: git branch/tag passed to Dockerfile
+    # - dockerfile: choose one
+    # - args:
+    #   COMFY_REF: git branch/tag
+    #   COMFY_CACHEBUST: forces rebuild of git clone layer when needed
     # ----------------------------------------------------------------
     build:
       context: .
-      # Only for amd64
+      # --- NVIDIA / CUDA (amd64 only) ---
       dockerfile: Dockerfile.dh
       # dockerfile: Dockerfile.dh-cu128
 
-      # works on arm64 and amd64
+      # --- NVIDIA / CUDA (works on arm64 and amd64 if you built multi-arch) ---
       # dockerfile: Dockerfile.dh-nvidia
       # dockerfile: Dockerfile.dh-nvidia-cu128
       # dockerfile: Dockerfile.ngc
       # dockerfile: Dockerfile.ngc-cu128
 
-      # Doesn't work on Blackwell
+      # --- NVIDIA / Legacy (doesn't work on Blackwell) ---
       # dockerfile: Dockerfile.dh-legacy
       # dockerfile: Dockerfile.dh-nvidia-legacy
       # dockerfile: Dockerfile.ngc-legacy
 
+      # --- AMD / ROCm (linux/amd64 only; requires ROCm-capable AMD GPU on host) ---
+      # dockerfile: Dockerfile.rocm
+
       args:
         COMFY_REF: master
 
-    # ----------------------------------------------------------------
-    # Image tag for the locally built image
-    # (This sets the resulting image name/tag after build)
-    # ----------------------------------------------------------------
-    image: registry-dev.slow-fire.net:6443/comfyui-dh:2.10.0-cu130
-    # image: registry-dev.slow-fire.net:6443/comfyui-dh-cu128:2.7.0-cu128
 
-    # works on arm64 and amd64
-    # image: registry-dev.slow-fire.net:6443/comfyui-dh-nvidia:cu130
-    # image: registry-dev.slow-fire.net:6443/comfyui-dh-nvidia:cu128
-    # image: registry-dev.slow-fire.net:6443/comfyui-ngc:25.11
-    # image: registry-dev.slow-fire.net:6443/comfyui-ngc:25.03
+    # ----------------------------------------------------------------
+    # Image selection
+    #
+    # Option A (default): Docker Hub-based build, pushed to private registry
+    # Option B: CUDA base (NVIDIA) with explicit torch installs
+    # Option C: NGC-based build, pushed to private registry
+    # Option D: ROCm-based build, pushed to private registry (AMD GPUs)
+    #
+    # Notes:
+    # - NGC images mirrored into your private registry do NOT require nvcr.io login.
+    # - ROCm images are effectively linux/amd64 + AMD GPU (ROCm stack) only.
+    # ----------------------------------------------------------------
 
-    # Doesn't work on Blackwell
-    # image: registry-dev.slow-fire.net:6443/comfyui-dh-legacy:2.6.0-cu126
-    # image: registry-dev.slow-fire.net:6443/comfyui-dh-nvidia:cu126
-    # image: registry-dev.slow-fire.net:6443/comfyui-ngc:24.12
+    # --- NVIDIA / CUDA (amd64 only) ---
+    image: comfyui-dh:2.10.0-cu130
+    # image: comfyui-dh-cu128:2.7.0-cu128
+
+    # --- NVIDIA / CUDA (works on arm64 and amd64 if you built multi-arch) ---
+    # image: comfyui-dh-nvidia:cu130
+    # image: comfyui-dh-nvidia:cu128
+    # image: comfyui-ngc:25.11
+    # image: comfyui-ngc:25.03
+
+    # --- NVIDIA / Legacy (doesn't work on Blackwell) ---
+    # image: comfyui-dh-legacy:2.6.0-cu126
+    # image: comfyui-dh-nvidia:cu126
+    # image: comfyui-ngc:24.12
+
+    # --- AMD / ROCm (linux/amd64 only; requires ROCm-capable AMD GPU on host) ---
+    # image: comfyui-rocm:rocm7
 
     # Container name and restart policy
     container_name: comfyui
@@ -69,14 +94,14 @@ services:
 
     # ----------------------------------------------------------------
     # IPC mode
-    # Required for some PyTorch / CUDA shared memory operations.
-    # Using host IPC avoids shared memory size limitations.
+    # - Useful for PyTorch shared memory operations.
+    # - Typically recommended for CUDA and often fine for ROCm as well.
     # ----------------------------------------------------------------
     ipc: host
 
     # ----------------------------------------------------------------
     # Resource limits
-    # memlock: allow unlimited locked memory (required for CUDA/NCCL stability)
+    # memlock: allow unlimited locked memory (often helpful for GPU runtimes)
     # stack: increase stack size for deep model execution graphs
     # ----------------------------------------------------------------
     ulimits:
@@ -86,49 +111,93 @@ services:
     # ----------------------------------------------------------------
     # Environment variables
     #
-    # NVIDIA_VISIBLE_DEVICES:
-    #   Controls which GPUs are exposed to container
-    #
-    # NVIDIA_DRIVER_CAPABILITIES:
-    #   Enables compute, utility, and video features
-    #
     # PYTHONUNBUFFERED:
-    #   Ensures real-time log output
+    #   Ensures real-time log output.
+    #
+    # TRITON_CACHE_DIR:
+    #   Persists Triton JIT cache to reduce repeated compilation cost.
     #
     # COMFY_ARGS:
     #   Additional CLI flags passed to ComfyUI main.py
-    #   (space-separated string; parsed safely inside container)
+    #   (space-separated string; parsed safely inside container).
+    #
+    # NVIDIA_VISIBLE_DEVICES / NVIDIA_DRIVER_CAPABILITIES:
+    #   Only applicable to NVIDIA Container Toolkit (CUDA/NGC images).
+    #   These are harmless for non-NVIDIA images, but you may comment them out
+    #   when using ROCm to avoid confusion.
     # ----------------------------------------------------------------
     environment:
-      NVIDIA_VISIBLE_DEVICES: "all"
-      NVIDIA_DRIVER_CAPABILITIES: "compute,utility,video"
       PYTHONUNBUFFERED: "1"
       TRITON_CACHE_DIR: "/opt/venv/.cache/triton"
+      # --- (NVIDIA)---
       COMFY_ARGS: "--use-sage-attention"
+      # --- ROCm notes (AMD GPUs) ---
+      #COMFY_ARGS: ""
+
+      # --- NVIDIA-only settings (CUDA/NGC images) ---
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility,video"
+
+      # --- ROCm notes (AMD GPUs) ---
+      # ROCm typically uses /dev/kfd and /dev/dri for GPU access.
+      # No special environment variables are strictly required here.
+      #
+      # If you need to control ROCm behavior, these are common toggles:
+      # HSA_OVERRIDE_GFX_VERSION: "11.0.0"   # Example only; set to your GPU's GFX if required
+      # HIP_VISIBLE_DEVICES: "0"            # Restrict visible GPUs (index-based)
+      # ROCR_VISIBLE_DEVICES: "0"           # Another device visibility control (rarely needed)
 
     # ----------------------------------------------------------------
-    # GPU access (Docker 19.03+)
-    # Grants full GPU access to container
+    # GPU access (NVIDIA)
+    # - Requires NVIDIA Container Toolkit on the host.
+    # - For ROCm images, this should be commented out (it is NVIDIA-specific).
     # ----------------------------------------------------------------
     gpus: all
+
+    # ----------------------------------------------------------------
+    # GPU access (ROCm / AMD) [COMMENTED]
+    #
+    # Enable these when using the ROCm image:
+    # - Map ROCm device nodes into the container
+    # - Add the "video" group so the container process can access /dev/dri
+    #
+    # Notes:
+    # - /dev/kfd: Kernel Fusion Driver (HSA/ROCm)
+    # - /dev/dri: DRM devices (render nodes)
+    # - group_add: "video" is commonly required; some distros also use "render"
+    # ----------------------------------------------------------------
+    # devices:
+    #   - /dev/kfd:/dev/kfd
+    #   - /dev/dri:/dev/dri
+    # group_add:
+    #   - "video"
+    #   - "render"
+    #
+    # Optional (ROCm):
+    # - If you hit permission issues, also consider running as a user that is
+    #   in the host's video/render groups, or set `user:` accordingly.
+    # - `ipc: host` is generally fine for ROCm too.
 
     # ----------------------------------------------------------------
     # Persistent volumes
     #
     # models:
-    #   External model storage (large files kept outside container)
+    #   External model storage (large files kept outside container).
     #
     # input/output:
-    #   Workflow I/O persistence
+    #   Workflow I/O persistence.
     #
     # custom_nodes:
-    #   Custom extensions/plugins
+    #   Custom extensions/plugins.
     #
     # user:
-    #   User-specific configuration and state
+    #   User-specific configuration and state.
+    #
+    # triton-cache:
+    #   Persist Triton JIT cache across restarts to reduce warm-up time.
     # ----------------------------------------------------------------
     volumes:
-      - ./data/model:/opt/ComfyUI/models
+      - ./data/models:/opt/ComfyUI/models
       - ./data/input:/opt/ComfyUI/input
       - ./data/output:/opt/ComfyUI/output
       - ./data/custom_nodes:/opt/ComfyUI/custom_nodes

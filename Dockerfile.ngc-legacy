@@ -1,50 +1,167 @@
 # syntax=docker/dockerfile:1
 # ------------------------------------------------------------------
-# ComfyUI on NVIDIA NGC PyTorch base image (NGC / AUDIO-NODES DISABLED)
+# ComfyUI on NVIDIA NGC PyTorch base image (NGC / NVIDIA-VALIDATED STACK)
 #
-# Design goals:
+# Goals:
 # - Use NVIDIA NGC PyTorch image (CUDA-enabled)
-# - Keep preinstalled CUDA-enabled torch from base image
-# - Avoid reinstalling torch/torchvision/torchaudio
-# - Install ComfyUI dependencies except torch-related packages
-# - Use Python venv with system-site-packages to reuse base torch
-# - Disable audio-related comfy_extras nodes to avoid torchaudio import errors
+# - Keep preinstalled CUDA-enabled torch from base image (do NOT reinstall torch/torchvision)
+# - Install ComfyUI deps into a venv with --system-site-packages
+# - Enable torchaudio WITHOUT pulling CUDA runtime deps:
+#     -> build torchaudio CPU-only wheel from source, then install that wheel
 #
 # Notes:
-# - Access to NGC images requires an NVIDIA NGC account.
-# - You must authenticate separately using:
-#     docker login nvcr.io
-#   with your NGC API key before pulling the base image.
-# - Audio workflows are intentionally disabled in this variant.
+# - docker login nvcr.io (NGC API key)
+# - NGC_TAG selects the exact NVIDIA-validated PyTorch/CUDA userland stack.
+#   This file is a "legacy" tag line (older than 25.xx) intended to reproduce
+#   older behavior and compatibility constraints.
+#
+# NumPy compatibility / incident context (this file is the "issue happened" variant):
+# - This image uses a venv with --system-site-packages:
+#     * torch lives in the base image (system site-packages)
+#     * many Python deps (including NumPy) are installed in the venv
+# - ComfyUI-Manager may install/update packages at startup (uv/pip).
+# - If NumPy is upgraded to 2.x while any loaded binary module (or interop bridge)
+#   expects NumPy 1.x ABI, torch<->numpy conversion may fail at runtime.
+#   Common observed symptoms:
+#     * Torch warning: "Failed to initialize NumPy" (ABI mismatch text)
+#     * ComfyUI SaveImage fails at: image.cpu().numpy()
+#     * RuntimeError: "Numpy is not available"
+#
+# What we do here (stability controls):
+# - Pin NumPy in the venv to < 2 (force reinstall) to keep ABI consistent.
+# - Add ComfyUI-Manager pip blacklist for numpy so Manager/uv won't upgrade it later.
+#
+# Important nuance (verified on a newer stack, not necessarily this legacy one):
+# - "NumPy 2.x present" does NOT always break torch->numpy.
+#   On some newer NGC tags, NumPy 2.x + torch can still pass:
+#     * torch.zeros(1).numpy()
+#     * torch.zeros(1, device="cuda").cpu().numpy()
+# - Therefore, failures are "environment/ABI combination dependent".
+#   This legacy Dockerfile keeps NumPy < 2 for reproducibility and to reduce
+#   regressions when dependency resolution or custom nodes change.
 # ------------------------------------------------------------------
 
+ARG NGC_TAG=24.12-py3
+ARG COMFY_REF=master
+ARG TORCHAUDIO_REF=v2.6.0
+
+# ==================================================================
+# Stage 1: Build torchaudio CPU-only wheel from source
+# ==================================================================
 # ------------------------------------------------------------------
-# Base Image
-# NGC PyTorch image (includes CUDA toolkit + cuDNN + NVIDIA-validated torch stack)
-# Requires prior authentication to nvcr.io (NGC registry)
-# ComfyUI on NVIDIA NGC PyTorch base image (NGC / CUDA 12.6.x class)
+# Build stage rationale:
+# - Build a CPU-only torchaudio wheel to avoid pulling CUDA runtime deps.
+# - Build links against the torch already present in the NGC base image,
+#   improving ABI compatibility with this specific container stack.
 #
-# Notes:
-# - This variant targets the CUDA 12.6.x generation (≈ cu126 class).
-# - Typically used as "pre-Blackwell" baseline / regression reference.
+# Compatibility note:
+# - TORCHAUDIO_REF should generally align with the torch series from the base image.
+#   If mismatched, the wheel build may fail or runtime import may break.
 # ------------------------------------------------------------------
-FROM nvcr.io/nvidia/pytorch:24.12-py3
+FROM nvcr.io/nvidia/pytorch:${NGC_TAG} AS build_torchaudio
 
 # ------------------------------------------------------------------
 # Build arguments
 # DEBIAN_FRONTEND: suppress interactive apt dialogs
-# COMFY_REF: git branch or tag for ComfyUI
+# TORCHAUDIO_REF: git branch/tag/commit for pytorch/audio
 # ------------------------------------------------------------------
 ARG DEBIAN_FRONTEND=noninteractive
-ARG COMFY_REF=master
+ARG TORCHAUDIO_REF
 
 # ------------------------------------------------------------------
-# Install minimal system dependencies
-# - git: clone ComfyUI repository
-# - ca-certificates: HTTPS support
-# - curl: network utility
-# - python3-venv/python3-full: create virtual environment
-# Clean apt cache to reduce image size
+# Install build dependencies for torchaudio wheel
+# - git, ca-certificates: fetch sources over HTTPS
+# - build-essential/cmake/ninja/pkg-config: native build toolchain
+# - python3-venv/python3-full: create venv + ensure full stdlib/modules
+# - sox + dev libs: enable audio backend headers for building torchaudio
+# - Clean apt lists to reduce layer size
+# ------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ca-certificates \
+      build-essential cmake ninja-build pkg-config \
+      python3-venv python3-full \
+      sox libsox-dev libsndfile1-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# ------------------------------------------------------------------
+# Create venv for build tooling (shares system site-packages)
+# - --system-site-packages allows reusing base image torch
+# - ensurepip + pip/setuptools/wheel updated for building wheels
+# ------------------------------------------------------------------
+ENV VENV=/opt/venv
+RUN python3 -m venv --system-site-packages ${VENV} \
+ && ${VENV}/bin/python -m ensurepip --upgrade \
+ && ${VENV}/bin/python -m pip install -U pip setuptools wheel
+
+# Force CPU-only build (no CUDA/ROCm)
+# - USE_CUDA/USE_ROCM: disable GPU backends for torchaudio build
+# - BUILD_SOX=0: do not build bundled sox (use system libs)
+ENV USE_CUDA=0
+ENV USE_ROCM=0
+ENV BUILD_SOX=0
+
+# ------------------------------------------------------------------
+# Sanity check:
+# Ensure build environment sees torch from the NGC base image.
+# This helps confirm we build against the intended torch.
+# ------------------------------------------------------------------
+# (Important) Ensure build links against the torch from NGC base image
+RUN ${VENV}/bin/python - <<'PY'
+import torch, sys
+print("TORCH=", torch.__version__)
+print("CUDA =", torch.version.cuda)
+print("torch file =", torch.__file__)
+PY
+
+# ------------------------------------------------------------------
+# Build wheel:
+# - Clone pytorch/audio with submodules
+# - Checkout TORCHAUDIO_REF
+# - Build a wheel with:
+#     --no-deps: avoid pulling dependencies
+#     --no-build-isolation: use current env/toolchain (torch from base)
+# - Constrain parallelism to reduce RAM/CPU pressure during build
+# ------------------------------------------------------------------
+RUN export MAX_JOBS=2 CMAKE_BUILD_PARALLEL_LEVEL=2 NINJA_FLAGS="-j2" \
+ && git clone --recursive https://github.com/pytorch/audio.git /tmp/torchaudio \
+ && cd /tmp/torchaudio \
+ && git checkout "${TORCHAUDIO_REF}" \
+ && git submodule update --init --recursive \
+ && mkdir -p /tmp/wheels \
+ && ${VENV}/bin/python -m pip wheel -v . \
+      --no-deps --no-build-isolation \
+      -w /tmp/wheels
+
+# ==================================================================
+# Stage 2: Runtime (ComfyUI)
+# ==================================================================
+# ------------------------------------------------------------------
+# Runtime stage rationale:
+# - Use the same NGC base tag to keep torch/CUDA stack consistent.
+# - Create venv with --system-site-packages to reuse base torch.
+# - Install ComfyUI deps excluding torch/torchvision/torchaudio.
+# - Install torchaudio from our CPU-only wheel built in Stage 1.
+# - Pin NumPy < 2 and blacklist it from Manager upgrades (stability).
+# ------------------------------------------------------------------
+FROM nvcr.io/nvidia/pytorch:${NGC_TAG}
+
+# ------------------------------------------------------------------
+# Build arguments
+# DEBIAN_FRONTEND: suppress interactive apt dialogs
+# COMFY_REF: git branch/tag/commit for ComfyUI
+# ------------------------------------------------------------------
+ARG DEBIAN_FRONTEND=noninteractive
+ARG COMFY_REF
+
+# ------------------------------------------------------------------
+# Install runtime system dependencies
+# - git, ca-certificates, curl: repo fetch + HTTPS diagnostics
+# - python3-venv/python3-full: venv creation + full python modules
+# - ffmpeg: video/image IO helpers used by some workflows/custom nodes
+# - libgl1, libglib2.0-0: common runtime libs for image ops/UI deps
+# - git-lfs: for pulling large model repos via LFS if needed
+# - sox, libsndfile1: audio runtime libs used by torchaudio/related nodes
+# - Clean apt lists to reduce layer size
 # ------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl \
@@ -52,6 +169,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ffmpeg \
       libgl1 libglib2.0-0 \
       git-lfs \
+      sox libsndfile1 \
     && git lfs install --system \
     && rm -rf /var/lib/apt/lists/*
 
@@ -73,25 +191,40 @@ PY
 
 # ------------------------------------------------------------------
 # Create Python virtual environment
-# --system-site-packages allows reuse of torch installed in base image
-# Ensure pip exists, then upgrade pip/setuptools/wheel
-# Install ComfyUI-Manager deps (GitPython) and uv (optional but helps)
+# - --system-site-packages allows reuse of torch installed in base image
+# - ensurepip then upgrade pip/setuptools/wheel
+# - Install GitPython and uv:
+#   * GitPython: required by ComfyUI-Manager for git operations
+#   * uv: optional fast installer; ComfyUI-Manager may prefer it if present
+#
+# NumPy stability measures (legacy tag line):
+# - Force reinstall NumPy < 2 into the venv so torch->numpy interop remains stable.
+# - This is a pragmatic workaround for environments where NumPy 2.x triggers
+#   "Failed to initialize NumPy" and then SaveImage fails.
 # ------------------------------------------------------------------
 ENV VENV=/opt/venv
 RUN python3 -m venv --system-site-packages ${VENV} \
  && ${VENV}/bin/python -m ensurepip --upgrade \
  && ${VENV}/bin/python -m pip install -U pip setuptools wheel \
- && ${VENV}/bin/python -m pip install -U GitPython uv
+ && ${VENV}/bin/python -m pip install -U GitPython uv \
+ && ${VENV}/bin/python -m pip install --no-cache-dir --force-reinstall "numpy<2"
 
 # ------------------------------------------------------------------
 # Clone ComfyUI and install dependencies
 #
 # Steps:
-# 1. Clone official repository
-# 2. Checkout specified branch/tag
-# 3. Remove torch/torchvision/torchaudio from requirements
-#    (we rely on base image versions)
-# 4. Install remaining dependencies into venv
+# 1) Clone official repository
+# 2) Checkout specified branch/tag/commit (COMFY_REF)
+# 3) Remove torch/torchvision/torchaudio from requirements.txt
+#    - We rely on base image torch
+#    - torchaudio is installed later from our CPU-only wheel
+# 4) Install remaining requirements into the venv
+# 5) Install sageattention (optional acceleration feature for attention)
+#
+# NumPy protection for ComfyUI-Manager:
+# - ComfyUI-Manager may install/update packages at runtime using uv/pip.
+# - To prevent it from upgrading NumPy to 2.x (and risking ABI mismatch),
+#   we add numpy to Manager's pip blacklist.
 # ------------------------------------------------------------------
 ARG COMFY_CACHEBUST=0
 RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
@@ -100,25 +233,59 @@ RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
  && git checkout "${COMFY_REF}" \
  && awk '!/^(torch|torchvision|torchaudio)([<>= ].*)?$/ {print}' requirements.txt > /tmp/requirements.no_torch.txt \
  && ${VENV}/bin/python -m pip install -U -r /tmp/requirements.no_torch.txt \
- && ${VENV}/bin/python -m pip install -U sageattention
+ && ${VENV}/bin/python -m pip install -U sageattention \
+ \
+ # --- Prevent ComfyUI-Manager from upgrading numpy to 2.x ---
+ && mkdir -p /opt/ComfyUI/user/__manager \
+ && cat <<'EOF' > /opt/ComfyUI/user/__manager/pip_blacklist.list
+numpy
+EOF
 
 # ------------------------------------------------------------------
-# Disable audio-related extra nodes
-# When torchaudio is intentionally NOT installed, some comfy_extras audio nodes
-# can fail at import time. Renaming these files prevents ComfyUI from loading them.
-#
-# Notes:
-# - Keep the operation idempotent (safe to rebuild).
-# - Keep the files on disk (easy to revert by renaming back).
+# Install torchaudio from wheel built in Stage 1
+# - Uninstall any existing torchaudio first (if present)
+# - Install our CPU-only wheel with --no-deps to avoid pulling runtime extras
+# - Remove wheel artifacts afterward
 # ------------------------------------------------------------------
-RUN cd /opt/ComfyUI \
- && for f in \
-      comfy_extras/nodes_audio.py \
-      comfy_extras/nodes_lt_audio.py \
-      comfy_extras/nodes_audio_encoder.py \
-    ; do \
-      if [ -f "$f" ] && [ ! -f "${f}.disabled" ]; then mv "$f" "${f}.disabled"; fi; \
-    done
+# Install torchaudio from wheel built in Stage 1
+COPY --from=build_torchaudio /tmp/wheels /tmp/wheels
+RUN ${VENV}/bin/python -m pip uninstall -y torchaudio || true \
+ && ${VENV}/bin/python -m pip install --no-deps /tmp/wheels/torchaudio-*.whl \
+ && rm -rf /tmp/wheels
+
+# ------------------------------------------------------------------
+# Copy torch dist-info into venv so uv/pip tools "see" torch (metadata only)
+#
+# Why:
+# - With --system-site-packages, torch is available at runtime.
+# - Some tooling (especially uv) may not detect torch as "installed"
+#   inside the venv because its dist-info lives in the system site-packages.
+# - Copying dist-info into venv's site-packages makes metadata visible without
+#   reinstalling torch.
+#
+# Note:
+# - This copies metadata only; it does not duplicate torch binaries.
+# ------------------------------------------------------------------
+# Copy torch dist-info into venv so uv/pip tools "see" torch (metadata only)
+RUN ${VENV}/bin/python - <<'PY'
+import shutil, sysconfig, importlib.metadata as md
+
+def copy_dist_info(name: str):
+    d = md.distribution(name)
+    src = getattr(d, "_path", None)
+    if not src:
+        raise SystemExit(f"{name} dist-info path not found")
+    dst = sysconfig.get_paths()["purelib"]
+    target = f"{dst}/{src.name}"
+    shutil.copytree(str(src), target, dirs_exist_ok=True)
+    print(f"Copied {name} dist-info to venv:", target)
+
+copy_dist_info("torch")
+try:
+    copy_dist_info("torchvision")
+except Exception as e:
+    print("torchvision dist-info copy skipped:", repr(e))
+PY
 
 # ------------------------------------------------------------------
 # Runtime configuration
@@ -131,10 +298,10 @@ ENV VIRTUAL_ENV=/opt/venv
 ENV PYTHONUNBUFFERED=1
 
 # Optional:
-# Fix Triton cache location to reduce repeated JIT work across restarts.
+# - Fix Triton cache location to reduce repeated JIT work across restarts.
+# - Useful when using Triton-backed kernels; harmless if unused.
 ENV TRITON_CACHE_DIR=/opt/venv/.cache/triton
 
-# Defaults (override via compose env if needed)
 ENV COMFY_LISTEN=0.0.0.0
 ENV COMFY_PORT=8188
 ENV COMFY_ARGS=""
@@ -142,17 +309,17 @@ ENV COMFY_ARGS=""
 # ------------------------------------------------------------------
 # Container startup sequence
 #
-# 1. Print minimal CUDA/runtime diagnostics (informational only).
-# 2. Build argument vector for main.py using:
+# 1) Print minimal CUDA/runtime diagnostics (informational only).
+# 2) Build argument vector for main.py using:
 #      --listen <COMFY_LISTEN>
 #      --port   <COMFY_PORT>
 #      + parsed COMFY_ARGS
-# 3. Use os.execv() to replace PID 1 with the Python process.
+# 3) Use os.execv() to replace PID 1 with the Python process.
 #    This ensures proper signal handling (SIGTERM/SIGINT).
 #
 # Security note:
-#   COMFY_ARGS is parsed using shlex.split() inside Python.
-#   It is NOT evaluated by the shell, preventing command injection.
+# - COMFY_ARGS is parsed using shlex.split() inside Python.
+# - It is NOT evaluated by the shell, reducing injection risk.
 # ------------------------------------------------------------------
 CMD ["/bin/sh", "-lc", "\
 /opt/venv/bin/python - <<'PY'\n\
@@ -163,6 +330,13 @@ print('cuda.is_available=', torch.cuda.is_available())\n\
 if torch.cuda.is_available():\n\
   print('device=', torch.cuda.get_device_name(0))\n\
   print('capability=', torch.cuda.get_device_capability(0))\n\
+try:\n\
+  import torchaudio\n\
+  print('torchaudio=', torchaudio.__version__)\n\
+  import torchaudio._extension\n\
+  print('torchaudio extension OK')\n\
+except Exception as e:\n\
+  print('torchaudio=IMPORT_FAIL', repr(e))\n\
 PY\n\
 /opt/venv/bin/python - <<'PY'\n\
 import os, shlex\n\

@@ -1,0 +1,173 @@
+# syntax=docker/dockerfile:1
+# ------------------------------------------------------------------
+# ComfyUI on NVIDIA NGC PyTorch base image (NGC / NVIDIA-VALIDATED STACK)
+#
+# Design goals:
+# - Use NVIDIA NGC PyTorch image (CUDA-enabled)
+# - Keep preinstalled CUDA-enabled torch from base image
+# - Avoid reinstalling torch/torchvision/torchaudio
+# - Install ComfyUI dependencies except torch-related packages
+# - Use Python venv with system-site-packages to reuse base torch
+#
+# Notes:
+# - Access to NGC images requires an NVIDIA NGC account.
+# - You must authenticate separately using:
+#     docker login nvcr.io
+#   with your NGC API key before pulling the base image.
+# - This image may not include torchaudio; ComfyUI audio-related nodes can emit warnings.
+#   Image generation is unaffected, but audio workflows may be unavailable unless you add torchaudio.
+# ------------------------------------------------------------------
+
+# ------------------------------------------------------------------
+# Base Image
+# NGC PyTorch image (includes CUDA toolkit + cuDNN + NVIDIA-validated torch stack)
+# Requires prior authentication to nvcr.io (NGC registry)
+# ------------------------------------------------------------------
+FROM nvcr.io/nvidia/pytorch:25.11-py3
+
+# ------------------------------------------------------------------
+# Build arguments
+# DEBIAN_FRONTEND: suppress interactive apt dialogs
+# COMFY_REF: git branch or tag for ComfyUI
+# ------------------------------------------------------------------
+ARG DEBIAN_FRONTEND=noninteractive
+ARG COMFY_REF=master
+
+# ------------------------------------------------------------------
+# Install minimal system dependencies
+# - git: clone ComfyUI repository
+# - ca-certificates: HTTPS support
+# - curl: network utility
+# - python3-venv/python3-full: create virtual environment
+# Clean apt cache to reduce image size
+# ------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ca-certificates curl \
+      python3-venv python3-full \
+      ffmpeg \
+      libgl1 libglib2.0-0 \
+      git-lfs \
+    && git lfs install --system \
+    && rm -rf /var/lib/apt/lists/*
+
+# ------------------------------------------------------------------
+# Sanity check:
+# Verify that torch in the base image is CUDA-enabled.
+# This does NOT require GPU at build time.
+# It ensures:
+# - torch.version.cuda is defined
+# - CUDA backend is compiled in
+# ------------------------------------------------------------------
+RUN python3 - <<'PY'
+import torch
+print("torch =", torch.__version__)
+print("torch.version.cuda =", torch.version.cuda)
+assert torch.version.cuda is not None
+assert torch.backends.cuda.is_built()
+PY
+
+# ------------------------------------------------------------------
+# Create Python virtual environment
+# --system-site-packages allows reuse of torch installed in base image
+# Ensure pip exists, then upgrade pip/setuptools/wheel
+# Install ComfyUI-Manager deps (GitPython) and uv (optional but helps)
+# ------------------------------------------------------------------
+ENV VENV=/opt/venv
+RUN python3 -m venv --system-site-packages ${VENV} \
+ && ${VENV}/bin/python -m ensurepip --upgrade \
+ && ${VENV}/bin/python -m pip install -U pip setuptools wheel \
+ && ${VENV}/bin/python -m pip install -U GitPython uv
+
+# ------------------------------------------------------------------
+# Clone ComfyUI and install dependencies
+#
+# Steps:
+# 1. Clone official repository
+# 2. Checkout specified branch/tag
+# 3. Remove torch/torchvision/torchaudio from requirements
+#    (we rely on base image versions)
+# 4. Install remaining dependencies into venv
+# ------------------------------------------------------------------
+ARG COMFY_CACHEBUST=0
+RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
+ && git clone https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
+ && cd /opt/ComfyUI \
+ && git checkout "${COMFY_REF}" \
+ && awk '!/^(torch|torchvision|torchaudio)([<>= ].*)?$/ {print}' requirements.txt > /tmp/requirements.no_torch.txt \
+ && ${VENV}/bin/python -m pip install -U -r /tmp/requirements.no_torch.txt \
+ && ${VENV}/bin/python -m pip install -U sageattention
+
+# ------------------------------------------------------------------
+# Disable audio-related extra nodes
+# When torchaudio is intentionally NOT installed, some comfy_extras audio nodes
+# can fail at import time. Renaming these files prevents ComfyUI from loading them.
+#
+# Notes:
+# - Keep the operation idempotent (safe to rebuild).
+# - Keep the files on disk (easy to revert by renaming back).
+# ------------------------------------------------------------------
+RUN cd /opt/ComfyUI \
+ && for f in \
+      comfy_extras/nodes_audio.py \
+      comfy_extras/nodes_lt_audio.py \
+      comfy_extras/nodes_audio_encoder.py \
+    ; do \
+      if [ -f "$f" ] && [ ! -f "${f}.disabled" ]; then mv "$f" "${f}.disabled"; fi; \
+    done
+
+# ------------------------------------------------------------------
+# Runtime configuration
+# ------------------------------------------------------------------
+WORKDIR /opt/ComfyUI
+EXPOSE 8188
+
+ENV PATH="/opt/venv/bin:${PATH}"
+ENV VIRTUAL_ENV=/opt/venv
+ENV PYTHONUNBUFFERED=1
+
+# Optional:
+# Fix Triton cache location to reduce repeated JIT work across restarts.
+ENV TRITON_CACHE_DIR=/opt/venv/.cache/triton
+
+# Defaults (override via compose env if needed)
+ENV COMFY_LISTEN=0.0.0.0
+ENV COMFY_PORT=8188
+ENV COMFY_ARGS=""
+
+# ------------------------------------------------------------------
+# Container startup sequence
+#
+# 1. Print minimal CUDA/runtime diagnostics (informational only).
+# 2. Build argument vector for main.py using:
+#      --listen <COMFY_LISTEN>
+#      --port   <COMFY_PORT>
+#      + parsed COMFY_ARGS
+# 3. Use os.execv() to replace PID 1 with the Python process.
+#    This ensures proper signal handling (SIGTERM/SIGINT).
+#
+# Security note:
+#   COMFY_ARGS is parsed using shlex.split() inside Python.
+#   It is NOT evaluated by the shell, preventing command injection.
+# ------------------------------------------------------------------
+CMD ["/bin/sh", "-lc", "\
+/opt/venv/bin/python - <<'PY'\n\
+import torch\n\
+print('torch=', torch.__version__)\n\
+print('cuda=', torch.version.cuda)\n\
+print('cuda.is_available=', torch.cuda.is_available())\n\
+if torch.cuda.is_available():\n\
+  print('device=', torch.cuda.get_device_name(0))\n\
+  print('capability=', torch.cuda.get_device_capability(0))\n\
+PY\n\
+/opt/venv/bin/python - <<'PY'\n\
+import os, shlex\n\
+listen = os.environ.get('COMFY_LISTEN', '0.0.0.0')\n\
+port   = os.environ.get('COMFY_PORT', '8188')\n\
+extra  = os.environ.get('COMFY_ARGS', '')\n\
+extra_args = shlex.split(extra) if extra.strip() else []\n\
+argv = ['/opt/venv/bin/python', 'main.py', '--listen', listen, '--port', str(port), *extra_args]\n\
+print('[comfy] argv:', ' '.join(shlex.quote(a) for a in argv[2:]))\n\
+os.chdir('/opt/ComfyUI')\n\
+os.execv(argv[0], argv)\n\
+PY\n\
+"]
