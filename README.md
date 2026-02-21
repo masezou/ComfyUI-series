@@ -19,11 +19,15 @@ across generations.
 
 ### GPU Generations Covered
 
+Nvidia
 -   Blackwell (50x0 / DGX Spark)
 -   Hopper
 -   Ampere
 -   Ada
 -   Turing
+
+AMD
+-   Radeon (Tested by Strix Halo)
 
 Some legacy builds intentionally exclude Blackwell for compatibility or
 driver reasons.
@@ -43,6 +47,10 @@ driver reasons.
 
   comfyui-ngc         NVIDIA NGC PyTorch       amd64 +      NVIDIA official
                                                arm64        full-stack builds
+
+  comfyui-rocm        Docker Hub               amd64        Minimal amd64-only
+                      rocm/pytorch                          reference builds
+
   ----------------------------------------------------------------------------
 
 ------------------------------------------------------------------------
@@ -118,6 +126,25 @@ docker buildx build   --platform linux/amd64   --build-arg COMFY_REF=master \
 
 ------------------------------------------------------------------------
 
+## D. AMD (ROCm 7.2)
+
+**Dockerfile.rocm**
+
+-   For AMD Radeon
+
+``` bash
+docker buildx use default
+docker buildx build   --platform linux/amd64   --build-arg COMFY_REF=master \
+--build-arg COMFY_CACHEBUST=$(date +%Y%m%d%H%M%S) \
+--tag registry.example.com/comfyui-rocm:rocm7 \
+--cache-from type=registry,ref=registry-buildcache.example.com/buildcache/comfyui-rocm:rocm7 \
+--cache-to   type=registry,ref=registry-buildcache.example.com/buildcache/comfyui-rocm:rocm7:cu126,mode=max \
+--push \
+-f Dockerfile.rocm \
+.
+
+------------------------------------------------------------------------
+
 # 2) NVIDIA CUDA Base (Multi-Arch)
 
 These builds use `nvidia/cuda` images.\
@@ -146,7 +173,8 @@ docker buildx build   --platform linux/amd64,linux/arm64   --build-arg COMFY_REF
 # 3) NGC Base (Multi-Arch)
 
 These builds use official NVIDIA NGC PyTorch containers.
-This is not support AUDIO because NGC image is not included torchaudio.
+Original NGC image is not  included torchaudio, This image is included torchaudio (CPU mode).
+*.woaudio file is original file which is not included torchaudio.
 
 ------------------------------------------------------------------------
 
