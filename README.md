@@ -53,6 +53,8 @@ driver reasons.
 
   ----------------------------------------------------------------------------
 
+Note: my build is built with container registry and buildcache container registry. If you don't have container registry environment, you can remove cache-from/cache-to.
+
 ------------------------------------------------------------------------
 
 # 1) Docker Hub PyTorch Base (amd64 only)
