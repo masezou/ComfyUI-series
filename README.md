@@ -142,6 +142,7 @@ docker buildx build   --platform linux/amd64   --build-arg COMFY_REF=master \
 --push \
 -f Dockerfile.rocm \
 .
+```
 
 ------------------------------------------------------------------------
 
