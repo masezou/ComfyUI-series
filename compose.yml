@@ -33,22 +33,22 @@ services:
     # ----------------------------------------------------------------
 
     # --- NVIDIA / CUDA (amd64 only) ---
-    image: comfyui-dh:2.10.0-cu130
-    # image: comfyui-dh-cu128:2.7.0-cu128
+    image: registry-dev.slow-fire.net:6443/comfyui-dh:2.10.0-cu130
+    # image: registry-dev.slow-fire.net:6443/comfyui-dh-cu128:2.7.0-cu128
 
     # --- NVIDIA / CUDA (works on arm64 and amd64 if you built multi-arch) ---
-    # image: comfyui-dh-nvidia:cu130
-    # image: comfyui-dh-nvidia:cu128
-    # image: comfyui-ngc:25.11
-    # image: comfyui-ngc:25.03
+    # image: registry-dev.slow-fire.net:6443/comfyui-dh-nvidia:cu130
+    # image: registry-dev.slow-fire.net:6443/comfyui-dh-nvidia:cu128
+    # image: registry-dev.slow-fire.net:6443/comfyui-ngc:25.11
+    # image: registry-dev.slow-fire.net:6443/comfyui-ngc:25.03
 
     # --- NVIDIA / Legacy (doesn't work on Blackwell) ---
-    # image: comfyui-dh-legacy:2.6.0-cu126
-    # image: comfyui-dh-nvidia:cu126
-    # image: comfyui-ngc:24.12
+    # image: registry-dev.slow-fire.net:6443/comfyui-dh-legacy:2.6.0-cu126
+    # image: registry-dev.slow-fire.net:6443/comfyui-dh-nvidia:cu126
+    # image: registry-dev.slow-fire.net:6443/comfyui-ngc:24.12
 
     # --- AMD / ROCm (linux/amd64 only; requires ROCm-capable AMD GPU on host) ---
-    # image: comfyui-rocm:rocm7
+    # image: registry-dev.slow-fire.net:6443/comfyui-rocm:rocm7
 
     # Container name and restart policy
     container_name: comfyui
@@ -100,7 +100,7 @@ services:
       TRITON_CACHE_DIR: "/opt/venv/.cache/triton"
       # --- (NVIDIA)---
       COMFY_ARGS: "--use-sage-attention"
-      # --- ROCm notes (AMD GPUs) ---
+      # --- (NVIDIA non sm120 / AMD GPUs) ---
       #COMFY_ARGS: ""
 
       # --- NVIDIA-only settings (CUDA/NGC images) ---
@@ -166,7 +166,9 @@ services:
     #   Persist Triton JIT cache across restarts to reduce warm-up time.
     # ----------------------------------------------------------------
     volumes:
-      - ./data/models:/opt/ComfyUI/models
+    # - ./data/models:/opt/ComfyUI/models
+      - /mnt/models/models/ComfyUI/models:/opt/ComfyUI/models
+    # - /mnt/windows/Users/tmase/Documents/ComfyUI/models:/opt/ComfyUI/models:ro
       - ./data/input:/opt/ComfyUI/input
       - ./data/output:/opt/ComfyUI/output
       - ./data/custom_nodes:/opt/ComfyUI/custom_nodes

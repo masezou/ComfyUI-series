@@ -41,6 +41,7 @@ ARG COMFY_REF=master
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl \
       python3-venv python3-full \
+      build-essential pkg-config python3-dev \
       ffmpeg \
       libgl1 libglib2.0-0 \
       git-lfs \
