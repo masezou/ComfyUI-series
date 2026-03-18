@@ -23,7 +23,7 @@ High-performance **ComfyUI Docker images** optimized for:
 
 ---
 
-## 🔥 Why This Repo Matters (STAR DRIVER)
+## 🔥 Why This Repo Matters
 
 👉 If you want:
 - Faster ComfyUI on **Blackwell GPUs**
@@ -128,7 +128,7 @@ GPU (Blackwell / Ada / Ampere)
 
 ---
 
-## 🔗 Keywords (for search engines)
+## 🔗 Keywords
 
 ComfyUI Docker
 ComfyUI CUDA 13
@@ -140,7 +140,7 @@ ComfyUI GPU setup
 
 ---
 
-## 🧩 Future Plans (Star growth hook)
+## 🧩 Future Plans
 
 - Benchmarks (cu130 vs cu128)
 - Flux / Z-Image-Turbo presets
