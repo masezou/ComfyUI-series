@@ -1,0 +1,188 @@
+# syntax=docker/dockerfile:1
+# ------------------------------------------------------------------
+# ComfyUI CPU-only image (multi-arch) - size-optimized multi-stage
+#
+# Stage 1 (builder):
+# - Install build tools and headers needed for compiling Python wheels if required
+# - Create a venv and install:
+#   - CPU-only PyTorch (torch/torchvision/torchaudio)
+#   - ComfyUI dependencies (excluding torch*)
+# - Clone ComfyUI source
+#
+# Stage 2 (runtime):
+# - Minimal runtime packages only (no compilers, no git)
+# - Copy venv and ComfyUI tree from builder
+# - Keep the same safe-argv startup logic as your original Dockerfile
+#
+# Key size wins:
+# - build-essential and git are NOT present in the final image
+# - pip caches are disabled and temp files are removed
+# - apt lists are cleaned in both stages
+#
+# Notes:
+# - This is designed for linux/amd64 and linux/arm64 with docker buildx.
+# - If a dependency needs compilation, it is compiled in builder and carried over via venv.
+# ------------------------------------------------------------------
+
+# ------------------------------------------------------------------
+# Stage 1: builder
+# ------------------------------------------------------------------
+FROM python:3.11-slim AS builder
+
+# BuildKit-provided args (useful for debugging)
+ARG TARGETPLATFORM
+ARG TARGETARCH
+
+# General build args
+ARG DEBIAN_FRONTEND=noninteractive
+ARG COMFY_REF=master
+
+# Pin versions for reproducibility
+ARG TORCH_VER=2.10.0
+ARG TV_VER=0.25.0
+ARG TA_VER=2.10.0
+
+# Environment for predictable, smaller installs
+ENV PIP_NO_CACHE_DIR=1
+ENV VENV=/opt/venv
+ENV PYTHONUNBUFFERED=1
+
+# ------------------------------------------------------------------
+# Builder deps
+# - Includes compilers and git because we build wheels and clone repos here
+# ------------------------------------------------------------------
+RUN echo "[build] (builder) TARGETPLATFORM=${TARGETPLATFORM} TARGETARCH=${TARGETARCH}" \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      git ca-certificates curl \
+      python3-venv \
+      ffmpeg \
+      libgl1 libglib2.0-0 \
+      git-lfs \
+      build-essential \
+    && git lfs install --system \
+    && rm -rf /var/lib/apt/lists/*
+
+# ------------------------------------------------------------------
+# Create venv and install baseline tooling
+# ------------------------------------------------------------------
+RUN python3 -m venv ${VENV} \
+ && ${VENV}/bin/python -m pip install -U pip setuptools wheel \
+ && ${VENV}/bin/python -m pip install -U GitPython uv \
+ && rm -rf /root/.cache /tmp/pip-* /tmp/tmp*
+
+# ------------------------------------------------------------------
+# Install CPU-only PyTorch wheels
+# ------------------------------------------------------------------
+RUN ${VENV}/bin/python -m pip install \
+      --index-url https://download.pytorch.org/whl/cpu \
+      torch==${TORCH_VER} torchvision==${TV_VER} torchaudio==${TA_VER} \
+ && rm -rf /root/.cache /tmp/pip-* /tmp/tmp*
+
+# ------------------------------------------------------------------
+# Sanity check (CPU-only)
+# ------------------------------------------------------------------
+RUN ${VENV}/bin/python - <<'PY'
+import platform, torch
+print("platform =", platform.platform())
+print("machine  =", platform.machine())
+print("torch    =", torch.__version__)
+print("cuda.is_available =", torch.cuda.is_available())
+assert not torch.cuda.is_available()
+PY
+
+# ------------------------------------------------------------------
+# Clone ComfyUI and install deps (excluding torch*)
+# ------------------------------------------------------------------
+ARG COMFY_CACHEBUST=0
+RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
+ && git clone https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
+ && cd /opt/ComfyUI \
+ && git checkout "${COMFY_REF}" \
+ && awk '!/^(torch|torchvision|torchaudio)([<>= ].*)?$/ {print}' requirements.txt > /tmp/requirements.no_torch.txt \
+ && ${VENV}/bin/python -m pip install -U -r /tmp/requirements.no_torch.txt \
+ && rm -f /tmp/requirements.no_torch.txt \
+ && rm -rf /root/.cache /tmp/pip-* /tmp/tmp*
+
+# ------------------------------------------------------------------
+# (Optional) strip caches inside venv to reduce size further
+# - Remove __pycache__ and .pyc files (safe but makes startup slightly slower on first import)
+# ------------------------------------------------------------------
+RUN find ${VENV} -type d -name "__pycache__" -prune -exec rm -rf {} + \
+ && find ${VENV} -type f -name "*.pyc" -delete
+
+# ------------------------------------------------------------------
+# Stage 2: runtime
+# ------------------------------------------------------------------
+FROM --platform=$TARGETPLATFORM python:3.11-slim AS runtime
+
+ARG TARGETPLATFORM
+ARG TARGETARCH
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Runtime env
+ENV VENV=/opt/venv
+ENV PIP_NO_CACHE_DIR=1
+ENV PYTHONUNBUFFERED=1
+
+# ------------------------------------------------------------------
+# Runtime deps only (no git, no compilers)
+# - ffmpeg/libgl1/libglib2.0-0 are kept for common ComfyUI workloads
+# - ca-certificates for HTTPS downloads (custom nodes may fetch assets)
+# ------------------------------------------------------------------
+RUN echo "[build] (runtime) TARGETPLATFORM=${TARGETPLATFORM} TARGETARCH=${TARGETARCH}" \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      ffmpeg \
+      libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# ------------------------------------------------------------------
+# Copy artifacts from builder
+# - venv contains torch + python deps
+# - /opt/ComfyUI contains source code
+# ------------------------------------------------------------------
+COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /opt/ComfyUI /opt/ComfyUI
+
+# ------------------------------------------------------------------
+# Runtime config
+# ------------------------------------------------------------------
+WORKDIR /opt/ComfyUI
+EXPOSE 8188
+
+ENV PATH="/opt/venv/bin:${PATH}"
+ENV VIRTUAL_ENV=/opt/venv
+
+ENV COMFY_LISTEN=0.0.0.0
+ENV COMFY_PORT=8188
+ENV COMFY_ARGS=""
+
+# ------------------------------------------------------------------
+# Entrypoint / CMD
+# - Print minimal runtime diagnostics (CPU-only torch status).
+# - Build argv for main.py using COMFY_LISTEN/COMFY_PORT/COMFY_ARGS.
+# - execv replaces PID 1 with Python for proper signal handling.
+#
+# Security note:
+# - COMFY_ARGS is parsed by Python's shlex.split(), not evaluated by the shell.
+# ------------------------------------------------------------------
+CMD ["/bin/sh", "-lc", "\
+/opt/venv/bin/python - <<'PY'\n\
+import torch\n\
+print('torch=', torch.__version__)\n\
+print('cuda.is_available=', torch.cuda.is_available())\n\
+PY\n\
+/opt/venv/bin/python - <<'PY'\n\
+import os, shlex\n\
+listen = os.environ.get('COMFY_LISTEN', '0.0.0.0')\n\
+port   = os.environ.get('COMFY_PORT', '8188')\n\
+extra  = os.environ.get('COMFY_ARGS', '')\n\
+extra_args = shlex.split(extra) if extra.strip() else []\n\
+argv = ['/opt/venv/bin/python', 'main.py', '--listen', listen, '--port', str(port), *extra_args]\n\
+print('[comfy] argv:', ' '.join(shlex.quote(a) for a in argv[2:]))\n\
+os.chdir('/opt/ComfyUI')\n\
+os.execv(argv[0], argv)\n\
+PY\n\
+"]

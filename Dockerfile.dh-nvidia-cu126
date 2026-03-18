@@ -15,11 +15,17 @@
 #   (host driver must be new enough for the newest GPU in use).
 # ------------------------------------------------------------------
 
+ARG CUDA_VER=12.6.0
+ARG UBUNTU_VER=24.04
+ARG PYTORCH_CUDA=cu126
+ARG COMFY_REF=master
+ARG COMFY_AIMDO_REF=v0.2.12
+
 # ------------------------------------------------------------------
 # Base Image
 # NVIDIA CUDA userland + cuDNN (NO PyTorch preinstalled)
 # ------------------------------------------------------------------
-FROM nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04
+FROM nvidia/cuda:${CUDA_VER}-cudnn-devel-ubuntu${UBUNTU_VER} AS builder
 
 # ------------------------------------------------------------------
 # Build arguments
@@ -28,8 +34,15 @@ FROM nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04
 # PYTORCH_CUDA: PyTorch wheel channel selector (cu130)
 # ------------------------------------------------------------------
 ARG DEBIAN_FRONTEND=noninteractive
-ARG COMFY_REF=master
-ARG PYTORCH_CUDA=cu130
+ARG PYTORCH_CUDA
+ARG COMFY_REF
+ARG COMFY_CACHEBUST=0
+
+ENV VENV=/opt/venv \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+# NOTE: PIP_NO_CACHE_DIR/PIP_DISABLE_PIP_VERSION_CHECK apply to pip inside this stage.
+#       This is mainly to avoid leaving pip caches in builder layers.
 
 # ------------------------------------------------------------------
 # Install minimal system dependencies
@@ -39,14 +52,14 @@ ARG PYTORCH_CUDA=cu130
 # - python3-venv/python3-full: create virtual environment
 # Clean apt cache to reduce image size
 # ------------------------------------------------------------------
+# NOTE: Comment says "python3-full" but this Dockerfile installs "python3" (smaller) instead.
+# NOTE: curl is installed, but currently not used (git clone is used for fetching ComfyUI).
+#       Keep curl only if you plan to switch to tarball download or use it elsewhere.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git ca-certificates curl \
-      python3-venv python3-full \
-      ffmpeg \
-      libgl1 libglib2.0-0 \
+      ca-certificates curl \
+      git \
+      python3 python3-venv \
       python3-dev build-essential \
-      git-lfs \
-    && git lfs install --system \
     && rm -rf /var/lib/apt/lists/*
 
 # ------------------------------------------------------------------
@@ -55,20 +68,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # - Upgrade pip/setuptools/wheel inside venv
 # Install ComfyUI-Manager deps (GitPython) and uv (optional but helps)
 # ------------------------------------------------------------------
-ENV VENV=/opt/venv
+# NOTE: If you want to reduce builder size further, consider removing uv/GitPython
+#       unless you actually use them at runtime or inside the container.
 RUN python3 -m venv ${VENV} \
  && ${VENV}/bin/python -m ensurepip --upgrade \
  && ${VENV}/bin/python -m pip install -U pip setuptools wheel \
- && ${VENV}/bin/python -m pip install -U GitPython uv
+ && ${VENV}/bin/python -m pip install -U GitPython uv \
+ && rm -rf /root/.cache /tmp/*
 
 # ------------------------------------------------------------------
 # Install PyTorch (CUDA wheels)
 # - Use official PyTorch wheel index for the selected CUDA channel
 # - This is the key difference between CU130/CU128/LEGACY variants.
 # ------------------------------------------------------------------
+# NOTE: This layer is expected to dominate image size (torch/vision/audio are huge).
+#       Requirements say torchaudio is needed, so we keep it.
 RUN ${VENV}/bin/python -m pip install -U \
       --index-url https://download.pytorch.org/whl/${PYTORCH_CUDA} \
-      torch torchvision torchaudio
+      torch torchvision torchaudio \
+ && rm -rf /root/.cache /tmp/*
 
 # ------------------------------------------------------------------
 # Sanity check:
@@ -88,32 +106,61 @@ PY
 # - For this variant we keep it simple: install requirements as-is
 #   (torch is already installed, pip will typically keep same-version wheels)
 # ------------------------------------------------------------------
-ARG COMFY_CACHEBUST=0
+# ComfyUI: shallow clone + remove .git
+# NOTE: This is NOT a shallow clone because --depth 1 is not set.
+#       You still remove .git afterwards, so the final runtime image does not keep the history.
+#       If you truly want "latest only" at fetch time, add: --depth 1
 RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
- && git clone https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
- && cd /opt/ComfyUI \
- && git checkout "${COMFY_REF}" \
- && ${VENV}/bin/python -m pip install -U -r requirements.txt \
- && ${VENV}/bin/python -m pip install -U sageattention
+ && git clone --branch "${COMFY_REF}" --single-branch \
+      https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
+ && rm -rf /opt/ComfyUI/.git
+
+# Install ComfyUI deps + sageattention, then clean caches
+# NOTE: This layer can still be large depending on Python deps (opencv/onnx/etc).
+#       If it stays big, inspect /opt/venv with du to find the heaviest packages.
+RUN ${VENV}/bin/python -m pip install -U -r /opt/ComfyUI/requirements.txt \
+ && ${VENV}/bin/python -m pip install -U sageattention \
+ && rm -rf /root/.cache /tmp/*
+
+
+# =========================
+# runtime (final image)
+# =========================
+FROM nvidia/cuda:${CUDA_VER}-cudnn-runtime-ubuntu${UBUNTU_VER}
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Runtime deps only (ffmpeg required)
+# NOTE: Keep this list minimal; anything added here remains in the final image.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      git \
+      python3 python3-venv \
+      libgl1 libglib2.0-0 \
+      ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Optional: Fix Triton cache location to reduce repeated JIT work across restarts.
+# Defaults (override via compose env if needed)
+# NOTE: Do not put comments mid-ENV line continuation; keep comments above ENV (parser safety).
+ENV VENV=/opt/venv \
+    PATH="/opt/venv/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    VIRTUAL_ENV=/opt/venv \
+    PYTHONUNBUFFERED=1 \
+    TRITON_CACHE_DIR=/opt/venv/.cache/triton \
+    COMFY_LISTEN=0.0.0.0 \
+    COMFY_PORT=8188 \
+    COMFY_ARGS=""
+
+COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /opt/ComfyUI /opt/ComfyUI
+# NOTE: Copying /opt/venv brings torch/vision/audio in; this is intended.
 
 # ------------------------------------------------------------------
 # Runtime configuration
 # ------------------------------------------------------------------
 WORKDIR /opt/ComfyUI
 EXPOSE 8188
-
-ENV PATH="/opt/venv/bin:${PATH}"
-ENV VIRTUAL_ENV=/opt/venv
-ENV PYTHONUNBUFFERED=1
-
-# Optional:
-# Fix Triton cache location to reduce repeated JIT work across restarts.
-ENV TRITON_CACHE_DIR=/opt/venv/.cache/triton
-
-# Defaults (override via compose env if needed)
-ENV COMFY_LISTEN=0.0.0.0
-ENV COMFY_PORT=8188
-ENV COMFY_ARGS=""
 
 # ------------------------------------------------------------------
 # Container startup sequence

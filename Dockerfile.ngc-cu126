@@ -54,9 +54,9 @@
 #   3) keep apt packages minimal (python3-full, git-lfs, sox tools) if not needed.
 # ------------------------------------------------------------------
 
-ARG NGC_TAG=25.03-py3
+ARG NGC_TAG=24.12-py3
 ARG COMFY_REF=master
-ARG TORCHAUDIO_REF=v2.7.0
+ARG TORCHAUDIO_REF=v2.6.0
 ARG COMFY_AIMDO_REF=v0.2.12
 
 # ==================================================================
@@ -250,6 +250,214 @@ RUN git clone https://github.com/Comfy-Org/comfy-aimdo.git /tmp/comfy-aimdo \
 #   force-installing NumPy into the venv. This can override/precede the base NumPy
 #   and is exactly the point for stability, but it may increase size slightly.
 # ------------------------------------------------------------------
+# ==================================================================
+# Stage 2: Runtime (ComfyUI)
+# ==================================================================
+FROM nvcr.io/nvidia/pytorch:${NGC_TAG}
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG COMFY_REF
+ARG COMFY_CACHEBUST=0
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ca-certificates curl \
+      python3-venv python3-full \
+      ffmpeg \
+      libgl1 libglib2.0-0 \
+      git-lfs \
+      sox libsndfile1 \
+    && git lfs install --system \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 - <<'PY'
+import torch
+print("torch =", torch.__version__)
+print("torch.version.cuda =", torch.version.cuda)
+assert torch.version.cuda is not None
+assert torch.backends.cuda.is_built()
+PY
+
+ENV VENV=/opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+ENV VIRTUAL_ENV=/opt/venv
+ENV PYTHONUNBUFFERED=1
+ENV TRITON_CACHE_DIR=/opt/venv/.cache/triton
+
+# ------------------------------------------------------------------
+# Global pip constraint to prevent NumPy 2.x from being pulled later
+# ------------------------------------------------------------------
+RUN cat <<'EOF' > /opt/pip-constraints.txt
+numpy<2
+EOF
+
+ENV PIP_CONSTRAINT=/opt/pip-constraints.txt
+
+# ------------------------------------------------------------------
+# Create venv and install tooling with constraints applied
+# ------------------------------------------------------------------
+RUN python3 -m venv --system-site-packages ${VENV} \
+ && ${VENV}/bin/python -m ensurepip --upgrade \
+ && ${VENV}/bin/python -m pip install -U pip setuptools wheel \
+ && ${VENV}/bin/python -m pip install -U GitPython uv
+
+# ------------------------------------------------------------------
+# Clone ComfyUI and install dependencies
+# - requirements install is constrained by PIP_CONSTRAINT
+# - sageattention install is also constrained
+# ------------------------------------------------------------------
+RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
+ && git clone https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
+ && cd /opt/ComfyUI \
+ && git checkout "${COMFY_REF}" \
+ && awk '!/^(torch|torchvision|torchaudio|comfy-aimdo)([<>= ].*)?$/ {print}' requirements.txt > /tmp/requirements.no_torch.txt \
+ && ${VENV}/bin/python -m pip install -U -r /tmp/requirements.no_torch.txt \
+ && ${VENV}/bin/python -m pip install -U sageattention \
+ && mkdir -p /opt/ComfyUI/user/__manager \
+ && cat <<'EOF' > /opt/ComfyUI/user/__manager/pip_blacklist.list
+numpy
+EOF
+
+# ------------------------------------------------------------------
+# Re-force NumPy < 2 AFTER all installs
+# This is the important fix.
+# ------------------------------------------------------------------
+RUN ${VENV}/bin/python -m pip uninstall -y numpy || true \
+ && ${VENV}/bin/python -m pip install --no-cache-dir --force-reinstall "numpy<2" \
+ && ${VENV}/bin/python - <<'PY'
+import sys
+import numpy
+print("numpy.version =", numpy.__version__)
+print("numpy.file =", numpy.__file__)
+print("sys.path =")
+for p in sys.path:
+    print(" ", p)
+assert int(numpy.__version__.split('.')[0]) < 2, numpy.__version__
+PY
+
+# ------------------------------------------------------------------
+# Install torchaudio from wheel built in Stage 1
+# ------------------------------------------------------------------
+COPY --from=build_torchaudio /tmp/wheels /tmp/wheels
+RUN ${VENV}/bin/python -m pip uninstall -y torchaudio || true \
+ && ${VENV}/bin/python -m pip install --no-deps /tmp/wheels/torchaudio-*.whl \
+ && rm -rf /tmp/wheels
+
+# ------------------------------------------------------------------
+# Install comfy-aimdo from wheel built in Stage 1-B
+# ------------------------------------------------------------------
+COPY --from=build_aimdo /tmp/wheels /tmp/wheels-aimdo
+RUN ${VENV}/bin/python -m pip uninstall -y comfy-aimdo || true \
+ && echo "=== stage-2 copied comfy-aimdo wheels ===" \
+ && ls -l /tmp/wheels-aimdo \
+ && WHEEL="$(find /tmp/wheels-aimdo -maxdepth 1 -type f -name 'comfy_aimdo-*.whl' | head -n1)" \
+ && test -n "${WHEEL}" \
+ && echo "Using wheel: ${WHEEL}" \
+ && ${VENV}/bin/python -m pip install --no-deps "${WHEEL}" \
+ && rm -rf /tmp/wheels-aimdo \
+ && ${VENV}/bin/python - <<'PY'
+import os
+import importlib.util
+import comfy_aimdo
+
+spec = importlib.util.find_spec("comfy_aimdo")
+print("comfy_aimdo.__file__ =", getattr(comfy_aimdo, "__file__", None))
+print("comfy_aimdo.__path__ =", list(getattr(comfy_aimdo, "__path__", [])))
+print("spec.origin =", getattr(spec, "origin", None))
+print("spec.submodule_search_locations =", list(spec.submodule_search_locations or []))
+
+pkg_dirs = list(getattr(comfy_aimdo, "__path__", []))
+assert pkg_dirs, "comfy_aimdo package directory not found"
+
+p = os.path.join(pkg_dirs[0], "aimdo.so")
+print("aimdo.so exists =", os.path.exists(p), p)
+assert os.path.exists(p), p
+PY
+
+# ------------------------------------------------------------------
+# Copy torch dist-info into venv so uv/pip tools "see" torch
+# ------------------------------------------------------------------
+RUN ${VENV}/bin/python - <<'PY'
+import shutil, sysconfig, importlib.metadata as md
+
+def copy_dist_info(name: str):
+    d = md.distribution(name)
+    src = getattr(d, "_path", None)
+    if not src:
+        raise SystemExit(f"{name} dist-info path not found")
+    dst = sysconfig.get_paths()["purelib"]
+    target = f"{dst}/{src.name}"
+    shutil.copytree(str(src), target, dirs_exist_ok=True)
+    print(f"Copied {name} dist-info to venv:", target)
+
+copy_dist_info("torch")
+try:
+    copy_dist_info("torchvision")
+except Exception as e:
+    print("torchvision dist-info copy skipped:", repr(e))
+PY
+
+# ------------------------------------------------------------------
+# Final sanity check:
+# confirm torch + numpy interop before runtime
+# ------------------------------------------------------------------
+RUN ${VENV}/bin/python - <<'PY'
+import torch
+import numpy
+print("torch =", torch.__version__)
+print("torch.file =", torch.__file__)
+print("numpy =", numpy.__version__)
+print("numpy.file =", numpy.__file__)
+x = torch.zeros(1)
+print("cpu numpy ok =", x.numpy())
+PY
+
+WORKDIR /opt/ComfyUI
+EXPOSE 8188
+
+ENV COMFY_LISTEN=0.0.0.0
+ENV COMFY_PORT=8188
+ENV COMFY_ARGS=""
+
+CMD ["/bin/sh", "-lc", "\
+/opt/venv/bin/python - <<'PY'\n\
+import torch, numpy\n\
+print('torch=', torch.__version__)\n\
+print('cuda=', torch.version.cuda)\n\
+print('cuda.is_available=', torch.cuda.is_available())\n\
+print('numpy=', numpy.__version__)\n\
+print('numpy.file=', numpy.__file__)\n\
+if torch.cuda.is_available():\n\
+  print('device=', torch.cuda.get_device_name(0))\n\
+  print('capability=', torch.cuda.get_device_capability(0))\n\
+try:\n\
+  import torchaudio\n\
+  print('torchaudio=', torchaudio.__version__)\n\
+  import torchaudio._extension\n\
+  print('torchaudio extension OK')\n\
+except Exception as e:\n\
+  print('torchaudio=IMPORT_FAIL', repr(e))\n\
+PY\n\
+/opt/venv/bin/python - <<'PY'\n\
+import os, shlex\n\
+listen = os.environ.get('COMFY_LISTEN', '0.0.0.0')\n\
+port   = os.environ.get('COMFY_PORT', '8188')\n\
+extra  = os.environ.get('COMFY_ARGS', '')\n\
+extra_args = shlex.split(extra) if extra.strip() else []\n\
+argv = ['/opt/venv/bin/python', 'main.py', '--listen', listen, '--port', str(port), *extra_args]\n\
+print('[comfy] argv:', ' '.join(shlex.quote(a) for a in argv[2:]))\n\
+os.chdir('/opt/ComfyUI')\n\
+os.execv(argv[0], argv)\n\
+PY\n\
+"]
+
+
+
+
+
+
+
+
+
 FROM nvcr.io/nvidia/pytorch:${NGC_TAG}
 
 # ------------------------------------------------------------------

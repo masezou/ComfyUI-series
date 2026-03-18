@@ -69,11 +69,14 @@ PY
 # Ensure pip exists, then upgrade pip/setuptools/wheel
 # Install ComfyUI-Manager deps (GitPython) and uv (optional but helps)
 # ------------------------------------------------------------------
-ENV VENV=/opt/venv
+ENV VENV=/opt/venv \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 RUN python3 -m venv --system-site-packages ${VENV} \
  && ${VENV}/bin/python -m ensurepip --upgrade \
  && ${VENV}/bin/python -m pip install -U pip setuptools wheel \
- && ${VENV}/bin/python -m pip install -U GitPython uv
+ && ${VENV}/bin/python -m pip install -U GitPython uv \
+ && rm -rf /root/.cache /tmp/pip-* /tmp/tmp*
 
 # ------------------------------------------------------------------
 # Clone ComfyUI and install dependencies
@@ -92,7 +95,9 @@ RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
  && git checkout "${COMFY_REF}" \
  && awk '!/^(torch|torchvision|torchaudio)([<>= ].*)?$/ {print}' requirements.txt > /tmp/requirements.no_torch.txt \
  && ${VENV}/bin/python -m pip install -U -r /tmp/requirements.no_torch.txt \
- && ${VENV}/bin/python -m pip install -U sageattention
+ && ${VENV}/bin/python -m pip install -U sageattention \
+ && rm -f /tmp/requirements.no_torch.txt \
+ && rm -rf /root/.cache /tmp/pip-* /tmp/tmp*
 
 # ------------------------------------------------------------------
 # Runtime configuration

@@ -7,23 +7,31 @@
 # - Install PyTorch CUDA wheels explicitly (torch/torchvision/torchaudio)
 # - Avoid optional CUDA extensions (xformers/flash-attn/triton builds)
 # - Install ComfyUI and its dependencies
+# - Build comfy-aimdo from source so aimdo.so is actually present
+# - Keep git available in the runtime image for ComfyUI-Manager / GitPython
 #
 # Notes:
 # - This is the "clean" baseline for Blackwell: CUDA 13.0 userland + torch cu130.
 # - Intended as the reference implementation for stable operation and best performance.
 # - Target GPUs (single image): Blackwell / Hopper / Ampere / Ada / Turing
 #   (host driver must be new enough for the newest GPU in use).
+#
+# Important caveat:
+# - This Dockerfile keeps the original Docker Hub PyTorch wheel approach.
+# - On some ARM64 / GB10 combinations, upstream torch wheels may still warn that
+#   capability 12.1 is beyond the wheel's declared support range.
+# - The comfy-aimdo and git issues are fixed here, but GB10-specific torch wheel
+#   behavior may still make the NGC-based image a better choice on GDX Spark.
 # ------------------------------------------------------------------
 
-ARG CUDA_VER=12.8.0
+ARG CUDA_VER=13.0.2
 ARG UBUNTU_VER=24.04
-ARG PYTORCH_CUDA=cu128
+ARG PYTORCH_CUDA=cu130
 ARG COMFY_REF=master
 ARG COMFY_AIMDO_REF=v0.2.12
 
 # ------------------------------------------------------------------
-# Base Image
-# NVIDIA CUDA userland + cuDNN (NO PyTorch preinstalled)
+# Builder stage
 # ------------------------------------------------------------------
 FROM nvidia/cuda:${CUDA_VER}-cudnn-devel-ubuntu${UBUNTU_VER} AS builder
 
@@ -49,12 +57,9 @@ ENV VENV=/opt/venv \
 # - git: clone ComfyUI repository
 # - ca-certificates: HTTPS support
 # - curl: network utility
-# - python3-venv/python3-full: create virtual environment
-# Clean apt cache to reduce image size
+# - python3/python3-venv: create virtual environment
+# - python3-dev/build-essential: build native Python extensions if needed
 # ------------------------------------------------------------------
-# NOTE: Comment says "python3-full" but this Dockerfile installs "python3" (smaller) instead.
-# NOTE: curl is installed, but currently not used (git clone is used for fetching ComfyUI).
-#       Keep curl only if you plan to switch to tarball download or use it elsewhere.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl \
       git \
@@ -66,10 +71,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create Python virtual environment
 # - Keep everything inside venv (base image has no torch anyway)
 # - Upgrade pip/setuptools/wheel inside venv
-# Install ComfyUI-Manager deps (GitPython) and uv (optional but helps)
+# - Install ComfyUI-Manager deps (GitPython) and uv (optional but helps)
 # ------------------------------------------------------------------
-# NOTE: If you want to reduce builder size further, consider removing uv/GitPython
-#       unless you actually use them at runtime or inside the container.
 RUN python3 -m venv ${VENV} \
  && ${VENV}/bin/python -m ensurepip --upgrade \
  && ${VENV}/bin/python -m pip install -U pip setuptools wheel \
@@ -81,8 +84,6 @@ RUN python3 -m venv ${VENV} \
 # - Use official PyTorch wheel index for the selected CUDA channel
 # - This is the key difference between CU130/CU128/LEGACY variants.
 # ------------------------------------------------------------------
-# NOTE: This layer is expected to dominate image size (torch/vision/audio are huge).
-#       Requirements say torchaudio is needed, so we keep it.
 RUN ${VENV}/bin/python -m pip install -U \
       --index-url https://download.pytorch.org/whl/${PYTORCH_CUDA} \
       torch torchvision torchaudio \
@@ -103,25 +104,81 @@ PY
 
 # ------------------------------------------------------------------
 # Clone ComfyUI and install dependencies
-# - For this variant we keep it simple: install requirements as-is
-#   (torch is already installed, pip will typically keep same-version wheels)
+# - Remove torch/torchvision/torchaudio/comfy-aimdo from requirements.
+#   We already install torch/vision/audio explicitly above.
+#   comfy-aimdo will be built from source in a dedicated stage.
 # ------------------------------------------------------------------
-# ComfyUI: shallow clone + remove .git
-# NOTE: This is NOT a shallow clone because --depth 1 is not set.
-#       You still remove .git afterwards, so the final runtime image does not keep the history.
-#       If you truly want "latest only" at fetch time, add: --depth 1
 RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
  && git clone --branch "${COMFY_REF}" --single-branch \
       https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
  && rm -rf /opt/ComfyUI/.git
 
-# Install ComfyUI deps + sageattention, then clean caches
-# NOTE: This layer can still be large depending on Python deps (opencv/onnx/etc).
-#       If it stays big, inspect /opt/venv with du to find the heaviest packages.
-RUN ${VENV}/bin/python -m pip install -U -r /opt/ComfyUI/requirements.txt \
+RUN awk '!/^(torch|torchvision|torchaudio|comfy-aimdo)([<>= ].*)?$/ {print}' \
+      /opt/ComfyUI/requirements.txt > /tmp/requirements.no_torch.txt \
+ && ${VENV}/bin/python -m pip install -U -r /tmp/requirements.no_torch.txt \
  && ${VENV}/bin/python -m pip install -U sageattention \
  && rm -rf /root/.cache /tmp/*
 
+# ==================================================================
+# Stage: build comfy-aimdo from source
+# ==================================================================
+# ------------------------------------------------------------------
+# Why this stage exists:
+# - Some environments end up with comfy-aimdo installed but without aimdo.so.
+# - Building from source ensures the shared object exists in the wheel.
+# - We support both x86_64 and arm64/aarch64 by switching CUDA target paths.
+# ------------------------------------------------------------------
+FROM nvidia/cuda:${CUDA_VER}-cudnn-devel-ubuntu${UBUNTU_VER} AS build_aimdo
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG COMFY_AIMDO_REF
+
+ENV VENV=/opt/venv \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      git \
+      python3 python3-venv \
+      python3-dev build-essential \
+      file \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv ${VENV} \
+ && ${VENV}/bin/python -m ensurepip --upgrade \
+ && ${VENV}/bin/python -m pip install -U pip setuptools wheel setuptools-scm \
+ && rm -rf /root/.cache /tmp/*
+
+RUN git clone https://github.com/Comfy-Org/comfy-aimdo.git /tmp/comfy-aimdo \
+ && cd /tmp/comfy-aimdo \
+ && git checkout "${COMFY_AIMDO_REF}" \
+ && ARCH="$(uname -m)" \
+ && case "${ARCH}" in \
+      x86_64) CUDA_TARGET="x86_64-linux" ;; \
+      aarch64|arm64) CUDA_TARGET="sbsa-linux" ;; \
+      *) echo "Unsupported arch: ${ARCH}" >&2; exit 1 ;; \
+    esac \
+ && echo "ARCH=${ARCH} CUDA_TARGET=${CUDA_TARGET}" \
+ && test -d "/usr/local/cuda/targets/${CUDA_TARGET}/include" \
+ && test -d "/usr/local/cuda/targets/${CUDA_TARGET}/lib/stubs" \
+ && test -f "/usr/local/cuda/targets/${CUDA_TARGET}/lib/stubs/libcuda.so" \
+ && gcc -shared -o comfy_aimdo/aimdo.so -fPIC \
+      -I"./src" \
+      -I"/usr/local/cuda/targets/${CUDA_TARGET}/include" \
+      -L"/usr/local/cuda/targets/${CUDA_TARGET}/lib/stubs" \
+      -Wno-error \
+      src/*.c src-posix/*.c -lcuda \
+ && test -f comfy_aimdo/aimdo.so \
+ && file comfy_aimdo/aimdo.so \
+ && mkdir -p /tmp/wheels \
+ && ${VENV}/bin/python -m pip wheel . \
+      --no-deps --no-build-isolation \
+      -w /tmp/wheels \
+ && echo "=== build_aimdo wheel output ===" \
+ && ls -l /tmp/wheels \
+ && find /tmp/wheels -maxdepth 1 -type f -name 'comfy_aimdo-*.whl' -print \
+ && test -n "$(find /tmp/wheels -maxdepth 1 -type f -name 'comfy_aimdo-*.whl' | head -n1)"
 
 # =========================
 # runtime (final image)
@@ -130,8 +187,8 @@ FROM nvidia/cuda:${CUDA_VER}-cudnn-runtime-ubuntu${UBUNTU_VER}
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-# Runtime deps only (ffmpeg required)
-# NOTE: Keep this list minimal; anything added here remains in the final image.
+# Runtime deps only
+# - git is intentionally included because ComfyUI-Manager / GitPython require it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       git \
@@ -142,7 +199,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Optional: Fix Triton cache location to reduce repeated JIT work across restarts.
 # Defaults (override via compose env if needed)
-# NOTE: Do not put comments mid-ENV line continuation; keep comments above ENV (parser safety).
 ENV VENV=/opt/venv \
     PATH="/opt/venv/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     VIRTUAL_ENV=/opt/venv \
@@ -154,7 +210,38 @@ ENV VENV=/opt/venv \
 
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /opt/ComfyUI /opt/ComfyUI
+COPY --from=build_aimdo /tmp/wheels /tmp/wheels-aimdo
 # NOTE: Copying /opt/venv brings torch/vision/audio in; this is intended.
+
+# ------------------------------------------------------------------
+# Install comfy-aimdo from source-built wheel and verify aimdo.so exists.
+# ------------------------------------------------------------------
+RUN ${VENV}/bin/python -m pip uninstall -y comfy-aimdo || true \
+ && echo "=== stage-2 copied comfy-aimdo wheels ===" \
+ && ls -l /tmp/wheels-aimdo \
+ && WHEEL="$(find /tmp/wheels-aimdo -maxdepth 1 -type f -name 'comfy_aimdo-*.whl' | head -n1)" \
+ && test -n "${WHEEL}" \
+ && echo "Using wheel: ${WHEEL}" \
+ && ${VENV}/bin/python -m pip install --no-deps "${WHEEL}" \
+ && rm -rf /tmp/wheels-aimdo \
+ && ${VENV}/bin/python - <<'PY'
+import os
+import importlib.util
+import comfy_aimdo
+
+spec = importlib.util.find_spec("comfy_aimdo")
+print("comfy_aimdo.__file__ =", getattr(comfy_aimdo, "__file__", None))
+print("comfy_aimdo.__path__ =", list(getattr(comfy_aimdo, "__path__", [])))
+print("spec.origin =", getattr(spec, "origin", None))
+print("spec.submodule_search_locations =", list(spec.submodule_search_locations or []))
+
+pkg_dirs = list(getattr(comfy_aimdo, "__path__", []))
+assert pkg_dirs, "comfy_aimdo package directory not found"
+
+p = os.path.join(pkg_dirs[0], "aimdo.so")
+print("aimdo.so exists =", os.path.exists(p), p)
+assert os.path.exists(p), p
+PY
 
 # ------------------------------------------------------------------
 # Runtime configuration
@@ -166,26 +253,37 @@ EXPOSE 8188
 # Container startup sequence
 #
 # 1. Print minimal CUDA/runtime diagnostics (informational only).
-# 2. Build argument vector for main.py using:
+# 2. Print comfy-aimdo status.
+# 3. Build argument vector for main.py using:
 #      --listen <COMFY_LISTEN>
 #      --port   <COMFY_PORT>
 #      + parsed COMFY_ARGS
-# 3. Use os.execv() to replace PID 1 with the Python process.
+# 4. Use os.execv() to replace PID 1 with the Python process.
 #    This ensures proper signal handling (SIGTERM/SIGINT).
-#
-# Security note:
-#   COMFY_ARGS is parsed using shlex.split() inside Python.
-#   It is NOT evaluated by the shell, preventing command injection.
 # ------------------------------------------------------------------
 CMD ["/bin/sh", "-lc", "\
 /opt/venv/bin/python - <<'PY'\n\
-import torch\n\
+import os, torch\n\
 print('torch=', torch.__version__)\n\
 print('cuda=', torch.version.cuda)\n\
 print('cuda.is_available=', torch.cuda.is_available())\n\
 if torch.cuda.is_available():\n\
   print('device=', torch.cuda.get_device_name(0))\n\
   print('capability=', torch.cuda.get_device_capability(0))\n\
+try:\n\
+  import importlib.util, comfy_aimdo\n\
+  spec = importlib.util.find_spec('comfy_aimdo')\n\
+  pkg_dirs = list(getattr(comfy_aimdo, '__path__', []))\n\
+  print('comfy-aimdo.__file__=', getattr(comfy_aimdo, '__file__', None))\n\
+  print('comfy-aimdo.__path__=', pkg_dirs)\n\
+  print('comfy-aimdo.spec.origin=', getattr(spec, 'origin', None))\n\
+  if pkg_dirs:\n\
+    p = os.path.join(pkg_dirs[0], 'aimdo.so')\n\
+    print('aimdo.so exists=', os.path.exists(p), p)\n\
+  else:\n\
+    print('aimdo.so exists= False package path not found')\n\
+except Exception as e:\n\
+  print('comfy-aimdo=IMPORT_FAIL', repr(e))\n\
 PY\n\
 /opt/venv/bin/python - <<'PY'\n\
 import os, shlex\n\

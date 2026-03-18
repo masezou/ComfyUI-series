@@ -1,35 +1,34 @@
 # syntax=docker/dockerfile:1
 # ------------------------------------------------------------------
-# ComfyUI on NVIDIA CUDA base image (Docker Hub) (LEGACY / PRE-BLACKWELL)
+# ComfyUI on Docker Hub PyTorch CUDA runtime (CU128 / COMPAT MODE)
 #
 # Design goals:
-# - Use NVIDIA CUDA image from Docker Hub (older CUDA userland)
-# - Install PyTorch CUDA wheels explicitly (torch/torchvision/torchaudio)
-# - Avoid optional CUDA extensions (xformers/flash-attn/triton builds)
-# - Install ComfyUI and its dependencies
+# - Use official PyTorch CUDA runtime image from Docker Hub (CUDA 12.8 / cu128)
+# - Keep preinstalled CUDA-enabled torch from base image
+# - Avoid reinstalling torch/torchvision/torchaudio
+# - Install ComfyUI dependencies except torch-related packages
+# - Use Python venv with system-site-packages to reuse base torch
 #
 # Notes:
-# - This image is intentionally "pre-Blackwell" for comparison / regression demos.
-# - On Blackwell (sm_120), this stack is expected to fail at runtime because
-#   the torch build typically lacks sm_120 kernels (no native kernels to launch).
-# - On older GPUs, it should run normally: Hopper / Ampere / Ada / Turing
+# - This image is intended as a "minimum viable" Blackwell-compatible baseline.
+# - It can run on Blackwell (sm_120) if the torch build includes sm_120 kernels.
+# - Performance/optimized CUDA paths may be more limited than cu130+ stacks.
 # ------------------------------------------------------------------
 
 # ------------------------------------------------------------------
 # Base Image
-# NVIDIA CUDA userland + cuDNN (NO PyTorch preinstalled)
+# CUDA 12.8 runtime + cuDNN + prebuilt torch (CUDA enabled)
+# Older torch series to demonstrate "works, but not optimal" behavior on Blackwell.
 # ------------------------------------------------------------------
-FROM nvidia/cuda:12.6.0-cudnn-devel-ubuntu24.04
+FROM pytorch/pytorch:2.8.0-cuda12.9-cudnn9-runtime
 
 # ------------------------------------------------------------------
 # Build arguments
 # DEBIAN_FRONTEND: suppress interactive apt dialogs
 # COMFY_REF: git branch or tag for ComfyUI
-# PYTORCH_CUDA: PyTorch wheel channel selector (cu126)
 # ------------------------------------------------------------------
 ARG DEBIAN_FRONTEND=noninteractive
 ARG COMFY_REF=master
-ARG PYTORCH_CUDA=cu126
 
 # ------------------------------------------------------------------
 # Install minimal system dependencies
@@ -42,40 +41,22 @@ ARG PYTORCH_CUDA=cu126
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl \
       python3-venv python3-full \
+      build-essential pkg-config python3-dev \
       ffmpeg \
       libgl1 libglib2.0-0 \
-      python3-dev build-essential \
       git-lfs \
     && git lfs install --system \
     && rm -rf /var/lib/apt/lists/*
 
 # ------------------------------------------------------------------
-# Create Python virtual environment
-# - Keep everything inside venv (base image has no torch anyway)
-# - Upgrade pip/setuptools/wheel inside venv
-# Install ComfyUI-Manager deps (GitPython) and uv (optional but helps)
-# ------------------------------------------------------------------
-ENV VENV=/opt/venv
-RUN python3 -m venv ${VENV} \
- && ${VENV}/bin/python -m ensurepip --upgrade \
- && ${VENV}/bin/python -m pip install -U pip setuptools wheel \
- && ${VENV}/bin/python -m pip install -U GitPython uv
-
-# ------------------------------------------------------------------
-# Install PyTorch (CUDA wheels)
-# - Use official PyTorch wheel index for the selected CUDA channel
-# - This is the key difference between CU130/CU128/LEGACY variants.
-# ------------------------------------------------------------------
-RUN ${VENV}/bin/python -m pip install -U \
-      --index-url https://download.pytorch.org/whl/${PYTORCH_CUDA} \
-      torch torchvision torchaudio
-
-# ------------------------------------------------------------------
 # Sanity check:
-# Verify that torch is CUDA-enabled in this environment.
+# Verify that torch in the base image is CUDA-enabled.
 # This does NOT require GPU at build time.
+# It ensures:
+# - torch.version.cuda is defined
+# - CUDA backend is compiled in
 # ------------------------------------------------------------------
-RUN ${VENV}/bin/python - <<'PY'
+RUN python3 - <<'PY'
 import torch
 print("torch =", torch.__version__)
 print("torch.version.cuda =", torch.version.cuda)
@@ -84,17 +65,40 @@ assert torch.backends.cuda.is_built()
 PY
 
 # ------------------------------------------------------------------
+# Create Python virtual environment
+# --system-site-packages allows reuse of torch installed in base image
+# Ensure pip exists, then upgrade pip/setuptools/wheel
+# Install ComfyUI-Manager deps (GitPython) and uv (optional but helps)
+# ------------------------------------------------------------------
+ENV VENV=/opt/venv \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+RUN python3 -m venv --system-site-packages ${VENV} \
+ && ${VENV}/bin/python -m ensurepip --upgrade \
+ && ${VENV}/bin/python -m pip install -U pip setuptools wheel \
+ && ${VENV}/bin/python -m pip install -U GitPython uv \
+ && rm -rf /root/.cache /tmp/pip-* /tmp/tmp*
+
+# ------------------------------------------------------------------
 # Clone ComfyUI and install dependencies
-# - For this variant we keep it simple: install requirements as-is
-#   (torch is already installed, pip will typically keep same-version wheels)
+#
+# Steps:
+# 1. Clone official repository
+# 2. Checkout specified branch/tag
+# 3. Remove torch/torchvision/torchaudio from requirements
+#    (we rely on base image versions)
+# 4. Install remaining dependencies into venv
 # ------------------------------------------------------------------
 ARG COMFY_CACHEBUST=0
 RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
  && git clone https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
  && cd /opt/ComfyUI \
  && git checkout "${COMFY_REF}" \
- && ${VENV}/bin/python -m pip install -U -r requirements.txt \
- && ${VENV}/bin/python -m pip install -U sageattention
+ && awk '!/^(torch|torchvision|torchaudio)([<>= ].*)?$/ {print}' requirements.txt > /tmp/requirements.no_torch.txt \
+ && ${VENV}/bin/python -m pip install --no-cache-dir -U -r /tmp/requirements.no_torch.txt \
+ && ${VENV}/bin/python -m pip install --no-cache-dir -U sageattention \
+ && rm -f /tmp/requirements.no_torch.txt \
+ && rm -rf /root/.cache /tmp/pip-* /tmp/tmp*
 
 # ------------------------------------------------------------------
 # Runtime configuration

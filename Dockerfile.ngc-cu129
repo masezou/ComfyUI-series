@@ -1,0 +1,268 @@
+# syntax=docker/dockerfile:1
+# ------------------------------------------------------------------
+# ComfyUI on NVIDIA NGC PyTorch base image
+# - Keep base torch/torchvision from NGC
+# - Build torchaudio wheel from source (CPU-only wheel, linked against base torch)
+# - Build comfy-aimdo from source with explicit Linux x86_64/arm64 handling
+# - Harden runtime validation so missing/broken aimdo.so fails at build time
+# ------------------------------------------------------------------
+
+ARG NGC_TAG=25.06-py3
+ARG COMFY_REF=master
+ARG TORCHAUDIO_REF=v2.8.0
+ARG COMFY_AIMDO_REF=master
+
+# ==================================================================
+# Stage 1: Build torchaudio wheel from source
+# ==================================================================
+FROM nvcr.io/nvidia/pytorch:${NGC_TAG} AS build_torchaudio
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG TORCHAUDIO_REF
+
+ENV VENV=/opt/venv \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    USE_CUDA=0 \
+    USE_ROCM=0 \
+    BUILD_SOX=0
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ca-certificates \
+      build-essential cmake ninja-build pkg-config \
+      python3-venv python3-full \
+      sox libsox-dev libsndfile1-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv --system-site-packages ${VENV} \
+ && ${VENV}/bin/python -m ensurepip --upgrade \
+ && ${VENV}/bin/python -m pip install -U pip setuptools wheel
+
+RUN ${VENV}/bin/python - <<'PY'
+import torch
+print('TORCH =', torch.__version__)
+print('CUDA =', torch.version.cuda)
+print('torch file =', torch.__file__)
+PY
+
+RUN export MAX_JOBS=2 CMAKE_BUILD_PARALLEL_LEVEL=2 NINJA_FLAGS='-j2' \
+ && git clone --recursive https://github.com/pytorch/audio.git /tmp/torchaudio \
+ && cd /tmp/torchaudio \
+ && git checkout "${TORCHAUDIO_REF}" \
+ && git submodule update --init --recursive \
+ && mkdir -p /tmp/wheels \
+ && ${VENV}/bin/python -m pip wheel -v . --no-deps --no-build-isolation -w /tmp/wheels \
+ && ls -l /tmp/wheels
+
+# ==================================================================
+# Stage 1-B: Build comfy-aimdo wheel from source
+# ==================================================================
+FROM nvcr.io/nvidia/pytorch:${NGC_TAG} AS build_aimdo
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG COMFY_AIMDO_REF
+ARG TARGETARCH
+
+ENV VENV=/opt/venv \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ca-certificates file \
+      build-essential \
+      python3-venv python3-full \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv --system-site-packages ${VENV} \
+ && ${VENV}/bin/python -m ensurepip --upgrade \
+ && ${VENV}/bin/python -m pip install -U pip setuptools wheel setuptools-scm
+
+RUN git clone https://github.com/Comfy-Org/comfy-aimdo.git /tmp/comfy-aimdo \
+ && cd /tmp/comfy-aimdo \
+ && git checkout "${COMFY_AIMDO_REF}" \
+ && ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
+ && case "${ARCH}" in \
+      amd64|x86_64) CUDA_TARGET='x86_64-linux' ;; \
+      arm64|aarch64) CUDA_TARGET='sbsa-linux' ;; \
+      *) echo "Unsupported arch: ${ARCH}" >&2; exit 1 ;; \
+    esac \
+ && echo "ARCH=${ARCH} CUDA_TARGET=${CUDA_TARGET}" \
+ && test -d "/usr/local/cuda/targets/${CUDA_TARGET}/include" \
+ && test -d "/usr/local/cuda/targets/${CUDA_TARGET}/lib/stubs" \
+ && test -f "/usr/local/cuda/targets/${CUDA_TARGET}/lib/stubs/libcuda.so" \
+ && gcc -shared -O2 -fPIC \
+      -I./src \
+      -I"/usr/local/cuda/targets/${CUDA_TARGET}/include" \
+      src/*.c src-posix/*.c \
+      -L"/usr/local/cuda/targets/${CUDA_TARGET}/lib/stubs" \
+      -Wl,--no-as-needed -lcuda -ldl -lpthread \
+      -o comfy_aimdo/aimdo.so \
+ && test -f comfy_aimdo/aimdo.so \
+ && file comfy_aimdo/aimdo.so \
+ && ldd comfy_aimdo/aimdo.so || true \
+ && ${VENV}/bin/python - <<'PY'
+import ctypes
+p = '/tmp/comfy-aimdo/comfy_aimdo/aimdo.so'
+print('load test =', p)
+ctypes.CDLL(p)
+print('ctypes load OK')
+PY
+
+RUN cd /tmp/comfy-aimdo \
+ && mkdir -p /tmp/wheels \
+ && ${VENV}/bin/python -m pip wheel . --no-deps --no-build-isolation -w /tmp/wheels \
+ && ls -l /tmp/wheels \
+ && find /tmp/wheels -maxdepth 1 -type f -name 'comfy_aimdo-*.whl' -print \
+ && test -n "$(find /tmp/wheels -maxdepth 1 -type f -name 'comfy_aimdo-*.whl' | head -n1)"
+
+# ==================================================================
+# Stage 2: Runtime image
+# ==================================================================
+FROM nvcr.io/nvidia/pytorch:${NGC_TAG}
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG COMFY_REF
+ARG COMFY_CACHEBUST=0
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ca-certificates curl \
+      python3-venv python3-full \
+      ffmpeg \
+      libgl1 libglib2.0-0 \
+      git-lfs \
+      sox libsndfile1 \
+    && git lfs install --system \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 - <<'PY'
+import torch
+print('torch =', torch.__version__)
+print('torch.version.cuda =', torch.version.cuda)
+assert torch.version.cuda is not None
+assert torch.backends.cuda.is_built()
+PY
+
+ENV VENV=/opt/venv \
+    PATH="/opt/venv/bin:${PATH}" \
+    VIRTUAL_ENV=/opt/venv \
+    PYTHONUNBUFFERED=1 \
+    TRITON_CACHE_DIR=/opt/venv/.cache/triton \
+    COMFY_LISTEN=0.0.0.0 \
+    COMFY_PORT=8188 \
+    COMFY_ARGS="" \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN python3 -m venv --system-site-packages ${VENV} \
+ && ${VENV}/bin/python -m ensurepip --upgrade \
+ && ${VENV}/bin/python -m pip install -U pip setuptools wheel \
+ && ${VENV}/bin/python -m pip install -U GitPython uv \
+ && ${VENV}/bin/python -m pip install --force-reinstall 'numpy<2'
+
+RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
+ && git clone --depth 1 https://github.com/Comfy-Org/ComfyUI.git /opt/ComfyUI \
+ && cd /opt/ComfyUI \
+ && git fetch --depth 1 origin "${COMFY_REF}" || true \
+ && git checkout "${COMFY_REF}" \
+ && awk '!/^(torch|torchvision|torchaudio|comfy-aimdo)([<>= ].*)?$/ {print}' requirements.txt > /tmp/requirements.no_torch.txt \
+ && ${VENV}/bin/python -m pip install -U -r /tmp/requirements.no_torch.txt \
+ && ${VENV}/bin/python -m pip install -U sageattention \
+ && mkdir -p /opt/ComfyUI/user/__manager \
+ && cat <<'EOBL' > /opt/ComfyUI/user/__manager/pip_blacklist.list
+numpy
+comfy-aimdo
+EOBL
+
+COPY --from=build_torchaudio /tmp/wheels /tmp/wheels
+RUN ${VENV}/bin/python -m pip uninstall -y torchaudio || true \
+ && ${VENV}/bin/python -m pip install --no-deps /tmp/wheels/torchaudio-*.whl \
+ && rm -rf /tmp/wheels
+
+COPY --from=build_aimdo /tmp/wheels /tmp/wheels-aimdo
+RUN ${VENV}/bin/python -m pip uninstall -y comfy-aimdo || true \
+ && WHEEL="$(find /tmp/wheels-aimdo -maxdepth 1 -type f -name 'comfy_aimdo-*.whl' | head -n1)" \
+ && test -n "${WHEEL}" \
+ && echo "Using wheel: ${WHEEL}" \
+ && ${VENV}/bin/python -m pip install --no-deps "${WHEEL}" \
+ && rm -rf /tmp/wheels-aimdo \
+ && ${VENV}/bin/python - <<'PY'
+import ctypes
+import importlib.util
+import os
+import comfy_aimdo
+spec = importlib.util.find_spec('comfy_aimdo')
+print('comfy_aimdo.__file__ =', getattr(comfy_aimdo, '__file__', None))
+print('spec.origin =', getattr(spec, 'origin', None))
+pkg_dirs = list(getattr(comfy_aimdo, '__path__', []))
+assert pkg_dirs, 'comfy_aimdo package directory not found'
+so_path = os.path.join(pkg_dirs[0], 'aimdo.so')
+print('aimdo.so =', so_path)
+assert os.path.exists(so_path), so_path
+ctypes.CDLL(so_path)
+print('ctypes load OK')
+PY
+
+RUN ${VENV}/bin/python - <<'PY'
+import shutil, sysconfig, importlib.metadata as md
+
+def copy_dist_info(name: str):
+    d = md.distribution(name)
+    src = getattr(d, '_path', None)
+    if not src:
+        raise SystemExit(f'{name} dist-info path not found')
+    dst = sysconfig.get_paths()['purelib']
+    target = f'{dst}/{src.name}'
+    shutil.copytree(str(src), target, dirs_exist_ok=True)
+    print(f'Copied {name} dist-info to venv: {target}')
+
+copy_dist_info('torch')
+try:
+    copy_dist_info('torchvision')
+except Exception as e:
+    print('torchvision dist-info copy skipped:', repr(e))
+PY
+
+WORKDIR /opt/ComfyUI
+EXPOSE 8188
+
+CMD ["/bin/sh", "-lc", "\
+/opt/venv/bin/python - <<'PY'\n\
+import ctypes, importlib.util, os, torch\n\
+print('torch=', torch.__version__)\n\
+print('cuda=', torch.version.cuda)\n\
+print('cuda.is_available=', torch.cuda.is_available())\n\
+if torch.cuda.is_available():\n\
+  print('device=', torch.cuda.get_device_name(0))\n\
+  print('capability=', torch.cuda.get_device_capability(0))\n\
+try:\n\
+  import torchaudio\n\
+  print('torchaudio=', torchaudio.__version__)\n\
+  import torchaudio._extension\n\
+  print('torchaudio extension OK')\n\
+except Exception as e:\n\
+  print('torchaudio=IMPORT_FAIL', repr(e))\n\
+try:\n\
+  import comfy_aimdo\n\
+  spec = importlib.util.find_spec('comfy_aimdo')\n\
+  pkg_dirs = list(getattr(comfy_aimdo, '__path__', []))\n\
+  so_path = os.path.join(pkg_dirs[0], 'aimdo.so') if pkg_dirs else ''\n\
+  print('comfy-aimdo=', getattr(comfy_aimdo, '__file__', None))\n\
+  print('comfy-aimdo.spec=', getattr(spec, 'origin', None))\n\
+  print('comfy-aimdo.aimdo_so=', so_path, os.path.exists(so_path))\n\
+  ctypes.CDLL(so_path)\n\
+  print('comfy-aimdo load OK')\n\
+except Exception as e:\n\
+  print('comfy-aimdo=IMPORT_FAIL', repr(e))\n\
+PY\n\
+/opt/venv/bin/python - <<'PY'\n\
+import os, shlex\n\
+listen = os.environ.get('COMFY_LISTEN', '0.0.0.0')\n\
+port = os.environ.get('COMFY_PORT', '8188')\n\
+extra = os.environ.get('COMFY_ARGS', '')\n\
+extra_args = shlex.split(extra) if extra.strip() else []\n\
+argv = ['/opt/venv/bin/python', 'main.py', '--listen', listen, '--port', str(port), *extra_args]\n\
+print('[comfy] argv:', ' '.join(shlex.quote(a) for a in argv[2:]))\n\
+os.chdir('/opt/ComfyUI')\n\
+os.execv(argv[0], argv)\n\
+PY\n\
+"]

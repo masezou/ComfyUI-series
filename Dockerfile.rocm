@@ -12,6 +12,12 @@
 # Notes:
 # - This is the "clean" baseline for ROCm: official HIP userland and torch build.
 # - Intended as the reference implementation for stable ROCm operation.
+#
+# NOTE (image size reality):
+# - rocm/pytorch base images are typically very large (ROCm userland + libs).
+#   The best size wins in this file come from:
+#   1) pip/uv cache removal, 2) shallow clone + remove .git,
+#   3) not installing heavy extra apt packages unless needed.
 # ------------------------------------------------------------------
 
 # ------------------------------------------------------------------
@@ -36,6 +42,13 @@ ARG COMFY_REF=master
 # - python3-venv/python3-full: create virtual environment
 # - ffmpeg/libgl/libglib: common runtime dependencies
 # Clean apt cache to reduce image size
+#
+# NOTE (size tuning points):
+# - python3-full is usually heavy. If the base image already includes full Python
+#   stdlib modules you need, you can often omit python3-full and keep python3-venv.
+# - git-lfs is also optional unless you actually do git lfs pulls inside the container.
+#   If you don't, removing git-lfs saves some size.
+# - Kept as-is here to preserve behavior, but you can safely try removing them.
 # ------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl \
@@ -66,12 +79,21 @@ PY
 # --system-site-packages allows reuse of torch installed in base image
 # Ensure pip exists, then upgrade pip/setuptools/wheel
 # Install ComfyUI-Manager deps (GitPython) and uv (optional)
+#
+# NOTE (size + determinism):
+# - Setting PIP_NO_CACHE_DIR=1 prevents pip wheel/http cache from being stored.
+# - Also remove /root/.cache and /tmp artifacts after installs.
+# - uv is optional; keeping it matches your other Dockerfiles and helps Manager,
+#   but if you don't use ComfyUI-Manager at all, removing uv can reduce a bit.
 # ------------------------------------------------------------------
-ENV VENV=/opt/venv
+ENV VENV=/opt/venv \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 RUN python3 -m venv --system-site-packages ${VENV} \
  && ${VENV}/bin/python -m ensurepip --upgrade \
  && ${VENV}/bin/python -m pip install -U pip setuptools wheel \
- && ${VENV}/bin/python -m pip install -U GitPython uv
+ && ${VENV}/bin/python -m pip install -U GitPython uv \
+ && rm -rf /root/.cache /tmp/*
 
 # ------------------------------------------------------------------
 # Clone ComfyUI and install dependencies
@@ -82,14 +104,21 @@ RUN python3 -m venv --system-site-packages ${VENV} \
 # 3. Remove torch/torchvision/torchaudio from requirements
 #    (we rely on base image versions)
 # 4. Install remaining dependencies into venv
+#
+# NOTE (size wins):
+# - Use shallow clone (--depth 1 --single-branch) to reduce git payload.
+# - Remove /opt/ComfyUI/.git so git history does not remain in the image.
+# - Remove temporary requirements file afterwards.
 # ------------------------------------------------------------------
 ARG COMFY_CACHEBUST=0
 RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
- && git clone https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
- && cd /opt/ComfyUI \
- && git checkout "${COMFY_REF}" \
- && awk '!/^(torch|torchvision|torchaudio)([<>= ].*)?$/ {print}' requirements.txt > /tmp/requirements.no_torch.txt \
- && ${VENV}/bin/python -m pip install -U -r /tmp/requirements.no_torch.txt
+ && git clone --depth 1 --single-branch --branch "${COMFY_REF}" \
+      https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
+ && rm -rf /opt/ComfyUI/.git \
+ && awk '!/^(torch|torchvision|torchaudio)([<>= ].*)?$/ {print}' /opt/ComfyUI/requirements.txt > /tmp/requirements.no_torch.txt \
+ && ${VENV}/bin/python -m pip install -U -r /tmp/requirements.no_torch.txt \
+ && rm -f /tmp/requirements.no_torch.txt \
+ && rm -rf /root/.cache /tmp/*
 
 # ------------------------------------------------------------------
 # Runtime configuration
@@ -124,6 +153,10 @@ ENV COMFY_ARGS=""
 # Security note:
 #   COMFY_ARGS is parsed using shlex.split() inside Python.
 #   It is NOT evaluated by the shell, preventing command injection.
+#
+# NOTE (ROCm nuance):
+# - For ROCm, torch.cuda.* is still the common API entry (HIP backend).
+#   Your diagnostic prints "cuda.is_available" which is expected to reflect HIP availability.
 # ------------------------------------------------------------------
 CMD ["/bin/sh", "-lc", "\
 /opt/venv/bin/python - <<'PY'\n\
