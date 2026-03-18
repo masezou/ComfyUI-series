@@ -48,7 +48,7 @@ http://localhost:8188
 
 ---
 
-## 🧠 Core Differentiation (SEO + Conversion)
+## 🧠 Core Differentiation
 
 ### cu130 = NOT just "latest CUDA"
 
@@ -82,7 +82,7 @@ This repo provides:
 
 ---
 
-## 🎯 Target Users (SEO targeting)
+## 🎯 Target Users
 
 - ComfyUI users looking for **Docker setup**
 - AI engineers running **DGX Spark**
@@ -98,7 +98,8 @@ This repo provides:
 
 | Image | Position |
 |------|---------|
-| cu130 | Fastest |
+| cu130 | Latest and Fastest |
+| cu129 | Blackwell Suports |
 | cu128 | Stable |
 | cu126 | Legacy |
 
