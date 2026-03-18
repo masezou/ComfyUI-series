@@ -20,7 +20,7 @@
 # CUDA 12.8 runtime + cuDNN + prebuilt torch (CUDA enabled)
 # Older torch series to demonstrate "works, but not optimal" behavior on Blackwell.
 # ------------------------------------------------------------------
-FROM pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime
+FROM pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime
 
 # ------------------------------------------------------------------
 # Build arguments

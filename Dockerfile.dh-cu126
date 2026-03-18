@@ -19,7 +19,7 @@
 # Base Image
 # Older CUDA runtime + cuDNN + prebuilt torch (CUDA enabled)
 # ------------------------------------------------------------------
-FROM pytorch/pytorch:2.6.0-cuda12.6-cudnn9-runtime
+FROM pytorch/pytorch:2.10.0-cuda12.6-cudnn9-runtime
 
 # ------------------------------------------------------------------
 # Build arguments
