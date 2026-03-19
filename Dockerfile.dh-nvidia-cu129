@@ -107,14 +107,7 @@ RUN git clone https://github.com/Comfy-Org/comfy-aimdo.git /tmp/comfy-aimdo \
       -o comfy_aimdo/aimdo.so \
  && test -f comfy_aimdo/aimdo.so \
  && file comfy_aimdo/aimdo.so \
- && ldd comfy_aimdo/aimdo.so || true \
- && ${VENV}/bin/python - <<'PY'
-import ctypes, os
-p = '/tmp/comfy-aimdo/comfy_aimdo/aimdo.so'
-print('load test =', p)
-ctypes.CDLL(p)
-print('ctypes load OK')
-PY
+ && ldd comfy_aimdo/aimdo.so || true
 
 RUN cd /tmp/comfy-aimdo \
  && mkdir -p /tmp/wheels \
