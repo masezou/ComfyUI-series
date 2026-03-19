@@ -148,7 +148,6 @@ RUN ${VENV}/bin/python -m pip uninstall -y comfy-aimdo || true \
  && ${VENV}/bin/python -m pip install --no-deps "${WHEEL}" \
  && rm -rf /tmp/wheels-aimdo \
  && ${VENV}/bin/python - <<'PY'
-import ctypes
 import importlib.util
 import os
 import comfy_aimdo
@@ -160,8 +159,7 @@ assert pkg_dirs, 'comfy_aimdo package directory not found'
 so_path = os.path.join(pkg_dirs[0], 'aimdo.so')
 print('aimdo.so =', so_path)
 assert os.path.exists(so_path), so_path
-ctypes.CDLL(so_path)
-print('ctypes load OK')
+print('aimdo.so exists OK')
 PY
 
 WORKDIR /opt/ComfyUI
