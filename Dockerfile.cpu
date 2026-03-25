@@ -38,9 +38,9 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG COMFY_REF=master
 
 # Pin versions for reproducibility
-ARG TORCH_VER=2.10.0
-ARG TV_VER=0.25.0
-ARG TA_VER=2.10.0
+ARG TORCH_VER=2.11.0
+ARG TV_VER=0.26.0
+ARG TA_VER=2.11.0
 
 # Environment for predictable, smaller installs
 ENV PIP_NO_CACHE_DIR=1
