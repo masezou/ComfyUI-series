@@ -27,7 +27,7 @@
 # ------------------------------------------------------------------
 # Stage 1: builder
 # ------------------------------------------------------------------
-FROM python:3.11-slim AS builder
+FROM python:3.12-slim AS builder
 
 # BuildKit-provided args (useful for debugging)
 ARG TARGETPLATFORM
@@ -114,7 +114,7 @@ RUN find ${VENV} -type d -name "__pycache__" -prune -exec rm -rf {} + \
 # ------------------------------------------------------------------
 # Stage 2: runtime
 # ------------------------------------------------------------------
-FROM --platform=$TARGETPLATFORM python:3.11-slim AS runtime
+FROM --platform=$TARGETPLATFORM python:3.12-slim AS runtime
 
 ARG TARGETPLATFORM
 ARG TARGETARCH
