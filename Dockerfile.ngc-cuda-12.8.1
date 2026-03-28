@@ -102,14 +102,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-ENV VENV=/opt/venv \
-    PATH="/opt/venv/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+ENV PATH="/opt/venv/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    VENV=/opt/venv \
     VIRTUAL_ENV=/opt/venv \
     PYTHONUNBUFFERED=1 \
     TRITON_CACHE_DIR=/opt/venv/.cache/triton \
     COMFY_LISTEN=0.0.0.0 \
     COMFY_PORT=8188 \
-    COMFY_ARGS="" \
+    COMFY_ARGS="--use-sage-attention" \
+    PYTORCH_SDP_DISABLE_FLASH=0 \
+    PYTORCH_SDP_DISABLE_MEM_EFFICIENT=0 \
+    PYTORCH_SDP_DISABLE_MATH=0 \
+    XFORMERS_FORCE_DISABLE_TRITON=1 \
+    TORCHDYNAMO_DISABLE=1 \
+    TORCHINDUCTOR_DISABLE=1 \
+    CUDA_CACHE_PATH=/opt/venv/.cache/nv/ComputeCache \
+    CUDA_CACHE_MAXSIZE=4294967296 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
     CC=gcc \
     CXX=g++
 
