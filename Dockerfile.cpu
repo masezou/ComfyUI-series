@@ -133,6 +133,7 @@ ENV PYTHONUNBUFFERED=1
 RUN echo "[build] (runtime) TARGETPLATFORM=${TARGETPLATFORM} TARGETARCH=${TARGETARCH}" \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
+      git \
       ca-certificates \
       ffmpeg \
       libgl1 libglib2.0-0 \
@@ -225,7 +226,7 @@ listen = os.environ.get('COMFY_LISTEN', '0.0.0.0')\n\
 port   = os.environ.get('COMFY_PORT', '8188')\n\
 extra  = os.environ.get('COMFY_ARGS', '')\n\
 extra_args = shlex.split(extra) if extra.strip() else []\n\
-argv = ['/opt/venv/bin/python', 'main.py', '--listen', listen, '--port', str(port), *extra_args]\n\
+argv = ['/opt/venv/bin/python', 'main.py', '--listen', listen, '--port', str(port), '--cpu', *extra_args]\n\
 print('[comfy] argv:', ' '.join(shlex.quote(a) for a in argv[2:]))\n\
 os.chdir('/opt/ComfyUI')\n\
 os.execv(argv[0], argv)\n\
