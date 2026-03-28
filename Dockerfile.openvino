@@ -1,0 +1,271 @@
+# syntax=docker/dockerfile:1
+# ------------------------------------------------------------------
+# ComfyUI Intel iGPU image (Ubuntu 24.04 / amd64) - OpenVINO-oriented
+#
+# Built from the provided Dockerfile.openvino and adjusted for:
+# - Intel iGPU use through OpenVINO
+# - CPU-only PyTorch for ComfyUI core startup stability
+# - Explicit Intel OpenCL ICD registration
+# - Safer startup diagnostics and startup scripts
+# - Shared base stage to avoid duplicate Intel runtime installation
+#
+# Notes:
+# - Intended for Intel iGPU + OpenVINO, not CUDA.
+# - ComfyUI core runs with CPU PyTorch.
+# - Keep COMFY_ARGS="--cpu" unless you intentionally change the design.
+# - The OpenVINO node can still use Intel GPU if OpenVINO sees GPU.
+# ------------------------------------------------------------------
+
+FROM ubuntu:24.04 AS base
+
+ARG TARGETPLATFORM
+ARG TARGETARCH
+ARG DEBIAN_FRONTEND=noninteractive
+ARG IGC_TAG=v2.30.1
+ARG IGC_VER=2.30.1+20950
+ARG COMPUTE_VER=26.09.37435.1
+ARG GMMLIB_VER=22.9.0
+
+ENV PIP_NO_CACHE_DIR=1
+ENV PYTHONUNBUFFERED=1
+ENV VENV=/opt/venv
+
+RUN echo "[build] (base) TARGETPLATFORM=${TARGETPLATFORM} TARGETARCH=${TARGETARCH}" \
+ && if [ "${TARGETARCH}" != "amd64" ]; then \
+      echo "This Dockerfile currently supports amd64 only."; \
+      exit 1; \
+    fi \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+      wget \
+      git \
+      git-lfs \
+      ffmpeg \
+      build-essential \
+      pkg-config \
+      python3 \
+      python3-venv \
+      python3-pip \
+      libgl1 \
+      libglib2.0-0 \
+      libgomp1 \
+      libstdc++6 \
+      libtbb12 \
+      libnuma1 \
+      libdrm2 \
+      libdrm-intel1 \
+      libze1 \
+      clinfo \
+      ocl-icd-libopencl1 \
+ && git lfs install --system \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    mkdir -p /tmp/intel; \
+    cd /tmp/intel; \
+    wget -S -O intel-igc-core.deb "https://github.com/intel/intel-graphics-compiler/releases/download/${IGC_TAG}/intel-igc-core-2_${IGC_VER}_amd64.deb"; \
+    wget -S -O intel-igc-opencl.deb "https://github.com/intel/intel-graphics-compiler/releases/download/${IGC_TAG}/intel-igc-opencl-2_${IGC_VER}_amd64.deb"; \
+    wget -S -O intel-ocloc.deb "https://github.com/intel/compute-runtime/releases/download/${COMPUTE_VER}/intel-ocloc_${COMPUTE_VER}-0_amd64.deb"; \
+    wget -S -O intel-opencl-icd.deb "https://github.com/intel/compute-runtime/releases/download/${COMPUTE_VER}/intel-opencl-icd_${COMPUTE_VER}-0_amd64.deb"; \
+    wget -S -O libigdgmm12.deb "https://github.com/intel/compute-runtime/releases/download/${COMPUTE_VER}/libigdgmm12_${GMMLIB_VER}_amd64.deb"; \
+    wget -S -O libze-intel-gpu1.deb "https://github.com/intel/compute-runtime/releases/download/${COMPUTE_VER}/libze-intel-gpu1_${COMPUTE_VER}-0_amd64.deb"; \
+    dpkg -i \
+      ./intel-igc-core.deb \
+      ./intel-igc-opencl.deb \
+      ./intel-ocloc.deb \
+      ./intel-opencl-icd.deb \
+      ./libigdgmm12.deb \
+      ./libze-intel-gpu1.deb \
+    || apt-get update && apt-get -fy install; \
+    rm -rf /tmp/intel /var/lib/apt/lists/*
+
+RUN mkdir -p /etc/OpenCL/vendors \
+ && printf '%s\n' '/usr/lib/x86_64-linux-gnu/intel-opencl/libigdrcl.so' > /etc/OpenCL/vendors/intel.icd \
+ && printf '%s\n' '/usr/lib/x86_64-linux-gnu/intel-opencl' > /etc/ld.so.conf.d/intel-opencl.conf \
+ && ldconfig
+
+FROM base AS builder
+
+ARG COMFY_REF=master
+ARG COMFY_CACHEBUST=0
+
+RUN python3 -m venv ${VENV} \
+ && ${VENV}/bin/python -m pip install -U pip setuptools wheel \
+ && ${VENV}/bin/python -m pip install -U GitPython uv \
+ && rm -rf /root/.cache /tmp/pip-* /tmp/tmp*
+
+RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
+ && git clone https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
+ && cd /opt/ComfyUI \
+ && git checkout "${COMFY_REF}" \
+ && ${VENV}/bin/python -m pip install -U -r requirements.txt \
+ && rm -rf /root/.cache /tmp/pip-* /tmp/tmp*
+
+# ------------------------------------------------------------------
+# Force CPU-only PyTorch for ComfyUI core stability
+# - Remove any CUDA/XPU builds that may have been pulled transitively
+# - Reinstall CPU wheels explicitly
+# ------------------------------------------------------------------
+RUN ${VENV}/bin/python -m pip uninstall -y torch torchvision torchaudio || true \
+ && ${VENV}/bin/python -m pip install --no-cache-dir \
+      --index-url https://download.pytorch.org/whl/cpu \
+      torch torchvision torchaudio \
+ && ${VENV}/bin/python -c "import torch; print('torch=', torch.__version__); print('cuda=', getattr(torch.version, 'cuda', None)); print('cuda.is_available=', torch.cuda.is_available())" \
+ && rm -rf /root/.cache /tmp/pip-* /tmp/tmp*
+
+RUN ${VENV}/bin/python -m pip install -U \
+      openvino \
+      openvino-tokenizers \
+      openvino-genai \
+ && rm -rf /root/.cache /tmp/pip-* /tmp/tmp*
+
+WORKDIR /opt/ComfyUI/custom_nodes
+RUN git clone https://github.com/openvino-dev-samples/comfyui_openvino.git \
+ && cd comfyui_openvino \
+ && if [ -f requirements.txt ]; then \
+      awk 'NF > 0 && $0 !~ /^[[:space:]]*#/ && $0 !~ /^(torch|torchvision|torchaudio)([<>=!~ ].*)?$/ {print}' requirements.txt > /tmp/comfyui_openvino.requirements.filtered.txt; \
+      if [ -s /tmp/comfyui_openvino.requirements.filtered.txt ]; then ${VENV}/bin/python -m pip install -U -r /tmp/comfyui_openvino.requirements.filtered.txt; fi; \
+      rm -f /tmp/comfyui_openvino.requirements.filtered.txt; \
+    fi \
+ && rm -rf /root/.cache /tmp/pip-* /tmp/tmp*
+
+RUN find ${VENV} -type d -name "__pycache__" -prune -exec rm -rf {} + \
+ && find ${VENV} -type f -name "*.pyc" -delete
+
+FROM base AS runtime
+
+ENV PATH="/opt/venv/bin:${PATH}" \
+    VIRTUAL_ENV=/opt/venv \
+    PYTHONUNBUFFERED=1 \
+    TRITON_CACHE_DIR=/opt/venv/.cache/triton \
+    COMFY_LISTEN=0.0.0.0 \
+    COMFY_PORT=8188 \
+    COMFY_ARGS="--cpu" \
+    OMP_NUM_THREADS=8 \
+    MKL_NUM_THREADS=8 \
+    OPENVINO_LOG_LEVEL=0 \
+    OPENVINO_TORCH_BACKEND_DEVICE=GPU \
+    SYCL_CACHE_PERSISTENT=1 \
+    SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=1 \
+    ONEAPI_DEVICE_SELECTOR=level_zero:gpu \
+    XFORMERS_FORCE_DISABLE_TRITON=1 \
+    TORCHDYNAMO_DISABLE=1 \
+    TORCHINDUCTOR_DISABLE=1
+
+COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /opt/ComfyUI /opt/ComfyUI
+
+WORKDIR /opt/ComfyUI
+EXPOSE 8188
+
+RUN python3 - <<'PY'
+from pathlib import Path
+Path('/usr/local/bin/check_openvino.py').write_text(
+'''import torch
+print("torch=", torch.__version__)
+print("cuda=", getattr(torch.version, "cuda", None))
+print("cuda.is_available=", torch.cuda.is_available())
+try:
+    import openvino as ov
+    core = ov.Core()
+    print("openvino.available_devices=", core.available_devices)
+except Exception as e:
+    print("openvino check failed=", e)
+'''
+)
+PY
+
+RUN python3 - <<'PY'
+from pathlib import Path
+Path('/usr/local/bin/launch_comfyui.py').write_text(
+'''import os
+import shlex
+
+listen = os.environ.get("COMFY_LISTEN", "0.0.0.0")
+port = os.environ.get("COMFY_PORT", "8188")
+extra = os.environ.get("COMFY_ARGS", "--cpu")
+extra_args = shlex.split(extra) if extra.strip() else []
+argv = ["/opt/venv/bin/python", "main.py", "--listen", listen, "--port", str(port), *extra_args]
+print("[comfy] argv:", " ".join(shlex.quote(a) for a in argv[2:]))
+os.chdir("/opt/ComfyUI")
+os.execv(argv[0], argv)
+'''
+)
+PY
+
+RUN python3 - <<'PY'
+from pathlib import Path
+Path('/usr/local/bin/run_comfyui.sh').write_text(
+'''#!/usr/bin/env bash
+set -u
+
+mkdir -p /opt/ComfyUI/.startup-state
+
+echo '[startup] Intel/OpenVINO diagnostics'
+ls -l /dev/dri 2>/dev/null || true
+
+echo '[startup] OpenCL vendors'
+ls -l /etc/OpenCL/vendors 2>/dev/null || true
+for f in /etc/OpenCL/vendors/*.icd; do
+  [ -e "$f" ] || continue
+  echo "--- $f ---"
+  cat "$f" || true
+done
+
+echo '[startup] ldconfig intel/opencl'
+ldconfig -p | grep -Ei 'igdrcl|ze_intel|ze_loader|opencl|igc' || true
+
+echo '[startup] clinfo'
+clinfo 2>/dev/null | sed -n '1,120p' || true
+
+/opt/venv/bin/python /usr/local/bin/check_openvino.py
+
+echo '[startup] scanning custom_nodes requirements...'
+find /opt/ComfyUI/custom_nodes -type f -name requirements.txt 2>/dev/null | while read -r req; do
+  node_dir="$(dirname "$req")"
+  node_name="$(basename "$node_dir")"
+  filtered="/tmp/${node_name}.requirements.filtered.txt"
+  hash_file="/opt/ComfyUI/.startup-state/${node_name}.requirements.sha256"
+  current_hash="$(sha256sum "$req" | awk '{print $1}')"
+  old_hash=""
+
+  if [ -f "$hash_file" ]; then
+    old_hash="$(cat "$hash_file" 2>/dev/null)"
+  fi
+
+  echo "[startup] found: $req"
+  awk 'NF > 0 && $0 !~ /^[[:space:]]*#/ && $0 !~ /^(torch|torchvision|torchaudio)([<>=!~ ].*)?$/ {print}' "$req" > "$filtered"
+
+  if [ ! -s "$filtered" ]; then
+    echo "[startup] no installable deps after filtering for $node_name"
+    echo "$current_hash" > "$hash_file"
+    rm -f "$filtered"
+    continue
+  fi
+
+  if [ "$current_hash" = "$old_hash" ]; then
+    echo "[startup] unchanged, skip install for $node_name"
+    rm -f "$filtered"
+    continue
+  fi
+
+  echo "[startup] changed, installing deps for $node_name"
+  /opt/venv/bin/python -m pip install --no-cache-dir --disable-pip-version-check -U -r "$filtered" && echo "$current_hash" > "$hash_file"
+  rc=$?
+  rm -f "$filtered"
+  if [ $rc -ne 0 ]; then
+    echo "[startup] pip install failed for $node_name"
+    exit $rc
+  fi
+done
+
+exec /opt/venv/bin/python /usr/local/bin/launch_comfyui.py
+'''
+)
+PY
+
+RUN chmod +x /usr/local/bin/run_comfyui.sh
+
+CMD ["/usr/local/bin/run_comfyui.sh"]
