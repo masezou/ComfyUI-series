@@ -33,22 +33,22 @@ services:
     # ----------------------------------------------------------------
 
     # --- NVIDIA / CUDA (amd64 only) ---
-    image: registry-dev.slow-fire.net:6443/comfyui-dh:2.10.0-cu130
-    # image: registry-dev.slow-fire.net:6443/comfyui-dh-cu128:2.7.0-cu128
+    image: local/comfyui-dh:2.11.0-cu130
+    # image: local/comfyui-dh:2.11.0-cu128
 
     # --- NVIDIA / CUDA (works on arm64 and amd64 if you built multi-arch) ---
-    # image: registry-dev.slow-fire.net:6443/comfyui-dh-nvidia:cu130
-    # image: registry-dev.slow-fire.net:6443/comfyui-dh-nvidia:cu128
-    # image: registry-dev.slow-fire.net:6443/comfyui-ngc:25.11
-    # image: registry-dev.slow-fire.net:6443/comfyui-ngc:25.03
+    # image: local/comfyui-dh-nvidia:cu130
+    # image: local/comfyui-dh-nvidia:cu128
+    # image: local/comfyui-ngc:25.11
+    # image: local/comfyui-ngc:25.03
 
     # --- NVIDIA / Legacy (doesn't work on Blackwell) ---
-    # image: registry-dev.slow-fire.net:6443/comfyui-dh-legacy:2.6.0-cu126
-    # image: registry-dev.slow-fire.net:6443/comfyui-dh-nvidia:cu126
-    # image: registry-dev.slow-fire.net:6443/comfyui-ngc:24.12
+    # image: local/comfyui-dh:2.11.0-cu126
+    # image: local/comfyui-dh-nvidia:cu126
+    # image: local/comfyui-ngc:24.12
 
     # --- AMD / ROCm (linux/amd64 only; requires ROCm-capable AMD GPU on host) ---
-    # image: registry-dev.slow-fire.net:6443/comfyui-rocm:rocm7
+    # image: local/comfyui-dh-rocm:7
 
     # Container name and restart policy
     container_name: comfyui
@@ -77,44 +77,24 @@ services:
       memlock: -1
       stack: 67108864
 
-    # ----------------------------------------------------------------
+    # --------------------------------------------------------------ddddd--
     # Environment variables
-    #
-    # PYTHONUNBUFFERED:
-    #   Ensures real-time log output.
-    #
-    # TRITON_CACHE_DIR:
-    #   Persists Triton JIT cache to reduce repeated compilation cost.
-    #
-    # COMFY_ARGS:
-    #   Additional CLI flags passed to ComfyUI main.py
-    #   (space-separated string; parsed safely inside container).
-    #
-    # NVIDIA_VISIBLE_DEVICES / NVIDIA_DRIVER_CAPABILITIES:
-    #   Only applicable to NVIDIA Container Toolkit (CUDA/NGC images).
-    #   These are harmless for non-NVIDIA images, but you may comment them out
-    #   when using ROCm to avoid confusion.
     # ----------------------------------------------------------------
     environment:
-      PYTHONUNBUFFERED: "1"
-      TRITON_CACHE_DIR: "/opt/venv/.cache/triton"
-      # --- (NVIDIA)---
-      COMFY_ARGS: "--use-sage-attention"
-      # --- (NVIDIA non sm120 / AMD GPUs) ---
-      #COMFY_ARGS: ""
+      # --- override only when needed ---
 
-      # --- NVIDIA-only settings (CUDA/NGC images) ---
-      NVIDIA_VISIBLE_DEVICES: "all"
-      NVIDIA_DRIVER_CAPABILITIES: "compute,utility,video"
+      # Disable SageAttention (GTX1050 / debug)
+      # COMFY_ARGS: ""
 
-      # --- ROCm notes (AMD GPUs) ---
-      # ROCm typically uses /dev/kfd and /dev/dri for GPU access.
-      # No special environment variables are strictly required here.
-      #
-      # If you need to control ROCm behavior, these are common toggles:
-      # HSA_OVERRIDE_GFX_VERSION: "11.0.0"   # Example only; set to your GPU's GFX if required
-      # HIP_VISIBLE_DEVICES: "0"            # Restrict visible GPUs (index-based)
-      # ROCR_VISIBLE_DEVICES: "0"           # Another device visibility control (rarely needed)
+      # AMD tuning (GPU dependent)
+      # HSA_OVERRIDE_GFX_VERSION: "11.0.0"
+
+      # Debug CUDA
+      # CUDA_LAUNCH_BLOCKING: "1"
+
+      # PyTorch allocator tuning
+      # PYTORCH_ALLOC_CONF: "backend:cudaMallocAsync"
+      # PYTORCH_ALLOC_CONF: "backend:native"
 
     # ----------------------------------------------------------------
     # GPU access (NVIDIA)
@@ -166,9 +146,7 @@ services:
     #   Persist Triton JIT cache across restarts to reduce warm-up time.
     # ----------------------------------------------------------------
     volumes:
-    # - ./data/models:/opt/ComfyUI/models
-      - /mnt/models/models/ComfyUI/models:/opt/ComfyUI/models
-    # - /mnt/windows/Users/tmase/Documents/ComfyUI/models:/opt/ComfyUI/models:ro
+      - ./data/models:/opt/ComfyUI/models
       - ./data/input:/opt/ComfyUI/input
       - ./data/output:/opt/ComfyUI/output
       - ./data/custom_nodes:/opt/ComfyUI/custom_nodes
