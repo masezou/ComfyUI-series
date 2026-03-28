@@ -24,7 +24,8 @@ ARG COMFY_CACHEBUST=0
 
 ENV VENV=/opt/venv \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TORCH_CUDA_ARCH_LIST=12.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git \
@@ -72,7 +73,8 @@ ARG TARGETARCH
 
 ENV VENV=/opt/venv \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TORCH_CUDA_ARCH_LIST=12.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates git file \
@@ -132,6 +134,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV PATH="/opt/venv/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     VENV=/opt/venv \
     VIRTUAL_ENV=/opt/venv \
+    TORCH_CUDA_ARCH_LIST=12.1 \
     PYTHONUNBUFFERED=1 \
     TRITON_CACHE_DIR=/opt/venv/.cache/triton \
     COMFY_LISTEN=0.0.0.0 \
