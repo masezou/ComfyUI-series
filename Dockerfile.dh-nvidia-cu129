@@ -10,6 +10,7 @@ ARG CUDA_VER=12.9.1
 ARG UBUNTU_VER=24.04
 ARG PYTORCH_CUDA=cu129
 ARG COMFY_REF=master
+ARG COMFY_COMMIT=
 ARG COMFY_AIMDO_REF=master
 
 # ==================================================================
@@ -27,7 +28,9 @@ ENV VENV=/opt/venv \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     TORCH_CUDA_ARCH_LIST=12.1
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git \
       python3 python3-venv python3-dev \
       build-essential \
@@ -37,12 +40,12 @@ RUN python3 -m venv ${VENV} \
  && ${VENV}/bin/python -m ensurepip --upgrade \
  && ${VENV}/bin/python -m pip install -U pip setuptools wheel \
  && ${VENV}/bin/python -m pip install -U GitPython uv \
- && rm -rf /root/.cache /tmp/*
+ && rm -rf /tmp/*
 
 RUN ${VENV}/bin/python -m pip install -U \
       --index-url https://download.pytorch.org/whl/${PYTORCH_CUDA} \
       torch torchvision torchaudio \
- && rm -rf /root/.cache /tmp/*
+ && rm -rf /tmp/*
 
 RUN ${VENV}/bin/python - <<'PY'
 import torch
@@ -60,7 +63,7 @@ RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
 RUN awk '!/^(comfy-aimdo)([<>= ].*)?$/ {print}' /opt/ComfyUI/requirements.txt > /tmp/requirements.no_aimdo.txt \
  && ${VENV}/bin/python -m pip install -U -r /tmp/requirements.no_aimdo.txt \
  && ${VENV}/bin/python -m pip install -U sageattention \
- && rm -rf /root/.cache /tmp/*
+ && rm -rf /tmp/*
 
 # ==================================================================
 # Stage 2: Build comfy-aimdo wheel from source
@@ -76,16 +79,19 @@ ENV VENV=/opt/venv \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     TORCH_CUDA_ARCH_LIST=12.1
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates git file \
       python3 python3-venv python3-dev \
       build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m venv ${VENV} \
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    python3 -m venv ${VENV} \
  && ${VENV}/bin/python -m ensurepip --upgrade \
  && ${VENV}/bin/python -m pip install -U pip setuptools wheel setuptools-scm \
- && rm -rf /root/.cache /tmp/*
+ && rm -rf /tmp/*
 
 RUN git clone https://github.com/Comfy-Org/comfy-aimdo.git /tmp/comfy-aimdo \
  && cd /tmp/comfy-aimdo \
@@ -124,7 +130,9 @@ FROM nvidia/cuda:${CUDA_VER}-cudnn-runtime-ubuntu${UBUNTU_VER}
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates git \
       python3 python3-venv \
       libgl1 libglib2.0-0 \

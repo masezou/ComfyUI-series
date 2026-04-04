@@ -1,47 +1,37 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.7
 # ------------------------------------------------------------------
-# ComfyUI on Docker Hub PyTorch CUDA runtime (CU128 / COMPAT MODE)
+# ComfyUI on Docker Hub PyTorch CUDA runtime (CU129 / COMPAT MODE)
+# AMD64-only variant
 #
 # Design goals:
-# - Use official PyTorch CUDA runtime image from Docker Hub (CUDA 12.8 / cu128)
+# - Compatibility-oriented image for CUDA 12.9 / cu129
 # - Keep preinstalled CUDA-enabled torch from base image
 # - Avoid reinstalling torch/torchvision/torchaudio
 # - Install ComfyUI dependencies except torch-related packages
 # - Use Python venv with system-site-packages to reuse base torch
-#
-# Notes:
-# - This image is intended as a "minimum viable" Blackwell-compatible baseline.
-# - It can run on Blackwell (sm_120) if the torch build includes sm_120 kernels.
-# - Performance/optimized CUDA paths may be more limited than cu130+ stacks.
+# - Improve rebuild efficiency with BuildKit cache mounts
+# - Track ComfyUI upstream with COMFY_COMMIT while keeping COMFY_CACHEBUST
 # ------------------------------------------------------------------
 
-# ------------------------------------------------------------------
-# Base Image
-# CUDA 12.8 runtime + cuDNN + prebuilt torch (CUDA enabled)
-# Older torch series to demonstrate "works, but not optimal" behavior on Blackwell.
-# ------------------------------------------------------------------
 FROM pytorch/pytorch:2.8.0-cuda12.9-cudnn9-runtime
 
-# ------------------------------------------------------------------
-# Build arguments
-# DEBIAN_FRONTEND: suppress interactive apt dialogs
-# COMFY_REF: git branch or tag for ComfyUI
-# ------------------------------------------------------------------
 ARG DEBIAN_FRONTEND=noninteractive
 ARG COMFY_REF=master
+ARG COMFY_COMMIT=
+ARG COMFY_CACHEBUST=0
+
+ENV VENV=/opt/venv \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # ------------------------------------------------------------------
 # Install minimal system dependencies
-# - git: clone ComfyUI repository
-# - ca-certificates: HTTPS support
-# - curl: network utility
-# - python3-venv/python3-full: create virtual environment
-# Clean apt cache to reduce image size
 # ------------------------------------------------------------------
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl \
       python3-venv python3-full \
-      build-essential pkg-config python3-dev \
       ffmpeg \
       libgl1 libglib2.0-0 \
       git-lfs \
@@ -51,10 +41,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ------------------------------------------------------------------
 # Sanity check:
 # Verify that torch in the base image is CUDA-enabled.
-# This does NOT require GPU at build time.
-# It ensures:
-# - torch.version.cuda is defined
-# - CUDA backend is compiled in
 # ------------------------------------------------------------------
 RUN python3 - <<'PY'
 import torch
@@ -67,42 +53,48 @@ PY
 # ------------------------------------------------------------------
 # Create Python virtual environment
 # --system-site-packages allows reuse of torch installed in base image
-# Ensure pip exists, then upgrade pip/setuptools/wheel
-# Install ComfyUI-Manager deps (GitPython) and uv (optional but helps)
 # ------------------------------------------------------------------
-ENV VENV=/opt/venv \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
-RUN python3 -m venv --system-site-packages ${VENV} \
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    python3 -m venv --system-site-packages ${VENV} \
  && ${VENV}/bin/python -m ensurepip --upgrade \
  && ${VENV}/bin/python -m pip install -U pip setuptools wheel \
  && ${VENV}/bin/python -m pip install -U GitPython uv \
- && rm -rf /root/.cache /tmp/pip-* /tmp/tmp*
+ && rm -rf /tmp/pip-* /tmp/tmp*
 
 # ------------------------------------------------------------------
-# Clone ComfyUI and install dependencies
-#
-# Steps:
-# 1. Clone official repository
-# 2. Checkout specified branch/tag
-# 3. Remove torch/torchvision/torchaudio from requirements
-#    (we rely on base image versions)
-# 4. Install remaining dependencies into venv
+# Clone ComfyUI
+# - COMFY_COMMIT is the preferred stable cache key for upstream tracking.
+# - COMFY_CACHEBUST is kept for emergency/manual invalidation.
 # ------------------------------------------------------------------
-ARG COMFY_CACHEBUST=0
 RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
- && git clone https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
+ && echo "COMFY_REF=${COMFY_REF}" \
+ && echo "COMFY_COMMIT=${COMFY_COMMIT}" \
+ && git clone --filter=blob:none https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
  && cd /opt/ComfyUI \
- && git checkout "${COMFY_REF}" \
- && awk '!/^(torch|torchvision|torchaudio)([<>= ].*)?$/ {print}' requirements.txt > /tmp/requirements.no_torch.txt \
- && ${VENV}/bin/python -m pip install --no-cache-dir -U -r /tmp/requirements.no_torch.txt \
- && ${VENV}/bin/python -m pip install --no-cache-dir -U sageattention \
- && rm -f /tmp/requirements.no_torch.txt \
- && rm -rf /root/.cache /tmp/pip-* /tmp/tmp*
+ && if [ -n "${COMFY_COMMIT}" ]; then \
+      git fetch --depth 1 origin "${COMFY_COMMIT}" \
+      && git checkout --detach "${COMFY_COMMIT}"; \
+    else \
+      git checkout "${COMFY_REF}"; \
+    fi
 
 # ------------------------------------------------------------------
-# Runtime configuration
+# Install ComfyUI dependencies except torch-related packages
 # ------------------------------------------------------------------
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    cd /opt/ComfyUI \
+ && awk '!/^(torch|torchvision|torchaudio)([<>= ].*)?$/ {print}' requirements.txt > /tmp/requirements.no_torch.txt \
+ && ${VENV}/bin/python -m pip install -U -r /tmp/requirements.no_torch.txt \
+ && rm -f /tmp/requirements.no_torch.txt \
+ && rm -rf /tmp/pip-* /tmp/tmp*
+
+# ------------------------------------------------------------------
+# Install sageattention separately to improve cache reuse
+# ------------------------------------------------------------------
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    ${VENV}/bin/python -m pip install -U sageattention \
+ && rm -rf /tmp/pip-* /tmp/tmp*
+
 WORKDIR /opt/ComfyUI
 EXPOSE 8188
 
@@ -125,21 +117,6 @@ ENV PATH="/opt/venv/bin:${PATH}" \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 
-# ------------------------------------------------------------------
-# Container startup sequence
-#
-# 1. Print minimal CUDA/runtime diagnostics (informational only).
-# 2. Build argument vector for main.py using:
-#      --listen <COMFY_LISTEN>
-#      --port   <COMFY_PORT>
-#      + parsed COMFY_ARGS
-# 3. Use os.execv() to replace PID 1 with the Python process.
-#    This ensures proper signal handling (SIGTERM/SIGINT).
-#
-# Security note:
-#   COMFY_ARGS is parsed using shlex.split() inside Python.
-#   It is NOT evaluated by the shell, preventing command injection.
-# ------------------------------------------------------------------
 CMD ["/bin/sh", "-lc", "\
 mkdir -p /opt/ComfyUI/.startup-state && \
 /opt/venv/bin/python - <<'PY'\n\
@@ -163,7 +140,7 @@ find /opt/ComfyUI/custom_nodes -type f -name requirements.txt 2>/dev/null | whil
     old_hash=\"$(cat \"$hash_file\" 2>/dev/null)\"\n\
   fi\n\
   echo \"[startup] found: $req\"\n\
-  awk 'NF > 0 && $0 !~ /^[[:space:]]*#/ && $0 !~ /^(torch|torchvision|torchaudio)([<>=!~ ].*)?$/' \"$req\" > \"$filtered\"\n\
+  awk 'NF > 0 && $0 !~ /^[[:space:]]*#/ && $0 !~ /^(torch|torchvision|torchaudio)([<>=!~ ].*)?$/\' \"$req\" > \"$filtered\"\n\
   if [ ! -s \"$filtered\" ]; then\n\
     echo \"[startup] no installable deps after filtering for $node_name\"\n\
     echo \"$current_hash\" > \"$hash_file\"\n\

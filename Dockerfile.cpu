@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.7
 # ------------------------------------------------------------------
 # ComfyUI CPU-only image (multi-arch) - size-optimized multi-stage
 #
@@ -36,6 +36,7 @@ ARG TARGETARCH
 # General build args
 ARG DEBIAN_FRONTEND=noninteractive
 ARG COMFY_REF=master
+ARG COMFY_COMMIT=master
 
 # Pin versions for reproducibility
 ARG TORCH_VER=2.11.0
@@ -51,7 +52,9 @@ ENV PYTHONUNBUFFERED=1
 # Builder deps
 # - Includes compilers and git because we build wheels and clone repos here
 # ------------------------------------------------------------------
-RUN echo "[build] (builder) TARGETPLATFORM=${TARGETPLATFORM} TARGETARCH=${TARGETARCH}" \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    echo "[build] (builder) TARGETPLATFORM=${TARGETPLATFORM} TARGETARCH=${TARGETARCH}" \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
       git ca-certificates curl \
@@ -66,18 +69,20 @@ RUN echo "[build] (builder) TARGETPLATFORM=${TARGETPLATFORM} TARGETARCH=${TARGET
 # ------------------------------------------------------------------
 # Create venv and install baseline tooling
 # ------------------------------------------------------------------
-RUN python3 -m venv ${VENV} \
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    python3 -m venv ${VENV} \
  && ${VENV}/bin/python -m pip install -U pip setuptools wheel \
  && ${VENV}/bin/python -m pip install -U GitPython uv \
- && rm -rf /root/.cache /tmp/pip-* /tmp/tmp*
+ && rm -rf /tmp/pip-* /tmp/tmp*
 
 # ------------------------------------------------------------------
 # Install CPU-only PyTorch wheels
 # ------------------------------------------------------------------
-RUN ${VENV}/bin/python -m pip install \
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    ${VENV}/bin/python -m pip install \
       --index-url https://download.pytorch.org/whl/cpu \
       torch==${TORCH_VER} torchvision==${TV_VER} torchaudio==${TA_VER} \
- && rm -rf /root/.cache /tmp/pip-* /tmp/tmp*
+ && rm -rf /tmp/pip-* /tmp/tmp*
 
 # ------------------------------------------------------------------
 # Sanity check (CPU-only)
@@ -96,13 +101,19 @@ PY
 # ------------------------------------------------------------------
 ARG COMFY_CACHEBUST=0
 RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
- && git clone https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
+ && echo "COMFY_REF=${COMFY_REF}" \
+ && echo "COMFY_COMMIT=${COMFY_COMMIT}" \
+ && git clone --filter=blob:none https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
  && cd /opt/ComfyUI \
- && git checkout "${COMFY_REF}" \
+ && git fetch --depth 1 origin "${COMFY_COMMIT}" \
+ && git checkout --detach "${COMFY_COMMIT}"
+
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    cd /opt/ComfyUI \
  && awk '!/^(torch|torchvision|torchaudio)([<>= ].*)?$/ {print}' requirements.txt > /tmp/requirements.no_torch.txt \
  && ${VENV}/bin/python -m pip install -U -r /tmp/requirements.no_torch.txt \
  && rm -f /tmp/requirements.no_torch.txt \
- && rm -rf /root/.cache /tmp/pip-* /tmp/tmp*
+ && rm -rf /tmp/pip-* /tmp/tmp*
 
 # ------------------------------------------------------------------
 # (Optional) strip caches inside venv to reduce size further
@@ -130,7 +141,9 @@ ENV PYTHONUNBUFFERED=1
 # - ffmpeg/libgl1/libglib2.0-0 are kept for common ComfyUI workloads
 # - ca-certificates for HTTPS downloads (custom nodes may fetch assets)
 # ------------------------------------------------------------------
-RUN echo "[build] (runtime) TARGETPLATFORM=${TARGETPLATFORM} TARGETARCH=${TARGETARCH}" \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    echo "[build] (runtime) TARGETPLATFORM=${TARGETPLATFORM} TARGETARCH=${TARGETARCH}" \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
       git \

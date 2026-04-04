@@ -1,19 +1,12 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.7
 # ------------------------------------------------------------------
 # ComfyUI Intel iGPU image (Ubuntu 24.04 / amd64) - OpenVINO-oriented
 #
-# Built from the provided Dockerfile.openvino and adjusted for:
-# - Intel iGPU use through OpenVINO
-# - CPU-only PyTorch for ComfyUI core startup stability
-# - Explicit Intel OpenCL ICD registration
-# - Safer startup diagnostics and startup scripts
-# - Shared base stage to avoid duplicate Intel runtime installation
-#
-# Notes:
-# - Intended for Intel iGPU + OpenVINO, not CUDA.
-# - ComfyUI core runs with CPU PyTorch.
-# - Keep COMFY_ARGS="--cpu" unless you intentionally change the design.
-# - The OpenVINO node can still use Intel GPU if OpenVINO sees GPU.
+# Revised for:
+# - cache mounts on apt/pip heavy steps
+# - COMFY_COMMIT support while keeping COMFY_CACHEBUST
+# - split ComfyUI checkout / requirements install for better cache reuse
+# - safer cleanup when cache mounts are in use
 # ------------------------------------------------------------------
 
 FROM ubuntu:24.04 AS base
@@ -30,7 +23,9 @@ ENV PIP_NO_CACHE_DIR=1
 ENV PYTHONUNBUFFERED=1
 ENV VENV=/opt/venv
 
-RUN echo "[build] (base) TARGETPLATFORM=${TARGETPLATFORM} TARGETARCH=${TARGETARCH}" \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    echo "[build] (base) TARGETPLATFORM=${TARGETPLATFORM} TARGETARCH=${TARGETARCH}" \
  && if [ "${TARGETARCH}" != "amd64" ]; then \
       echo "This Dockerfile currently supports amd64 only."; \
       exit 1; \
@@ -89,37 +84,51 @@ RUN mkdir -p /etc/OpenCL/vendors \
 FROM base AS builder
 
 ARG COMFY_REF=master
+ARG COMFY_COMMIT=
 ARG COMFY_CACHEBUST=0
 
-RUN python3 -m venv ${VENV} \
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    python3 -m venv ${VENV} \
  && ${VENV}/bin/python -m pip install -U pip setuptools wheel \
  && ${VENV}/bin/python -m pip install -U GitPython uv \
- && rm -rf /root/.cache /tmp/pip-* /tmp/tmp*
+ && rm -rf /tmp/pip-* /tmp/tmp*
 
 RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
- && git clone https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
+ && echo "COMFY_REF=${COMFY_REF}" \
+ && echo "COMFY_COMMIT=${COMFY_COMMIT}" \
+ && git clone --filter=blob:none https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
  && cd /opt/ComfyUI \
- && git checkout "${COMFY_REF}" \
+ && if [ -n "${COMFY_COMMIT}" ]; then \
+      git fetch --depth 1 origin "${COMFY_COMMIT}" \
+   && git checkout --detach "${COMFY_COMMIT}"; \
+    else \
+      git checkout "${COMFY_REF}"; \
+    fi
+
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    cd /opt/ComfyUI \
  && ${VENV}/bin/python -m pip install -U -r requirements.txt \
- && rm -rf /root/.cache /tmp/pip-* /tmp/tmp*
+ && rm -rf /tmp/pip-* /tmp/tmp*
 
 # ------------------------------------------------------------------
 # Force CPU-only PyTorch for ComfyUI core stability
 # - Remove any CUDA/XPU builds that may have been pulled transitively
 # - Reinstall CPU wheels explicitly
 # ------------------------------------------------------------------
-RUN ${VENV}/bin/python -m pip uninstall -y torch torchvision torchaudio || true \
- && ${VENV}/bin/python -m pip install --no-cache-dir \
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    ${VENV}/bin/python -m pip uninstall -y torch torchvision torchaudio || true \
+ && ${VENV}/bin/python -m pip install \
       --index-url https://download.pytorch.org/whl/cpu \
       torch torchvision torchaudio \
  && ${VENV}/bin/python -c "import torch; print('torch=', torch.__version__); print('cuda=', getattr(torch.version, 'cuda', None)); print('cuda.is_available=', torch.cuda.is_available())" \
- && rm -rf /root/.cache /tmp/pip-* /tmp/tmp*
+ && rm -rf /tmp/pip-* /tmp/tmp*
 
-RUN ${VENV}/bin/python -m pip install -U \
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    ${VENV}/bin/python -m pip install -U \
       openvino \
       openvino-tokenizers \
       openvino-genai \
- && rm -rf /root/.cache /tmp/pip-* /tmp/tmp*
+ && rm -rf /tmp/pip-* /tmp/tmp*
 
 WORKDIR /opt/ComfyUI/custom_nodes
 RUN git clone https://github.com/openvino-dev-samples/comfyui_openvino.git \

@@ -38,9 +38,9 @@
 #   * minimizing apt packages (python3-full/git-lfs/sox tools) if not needed.
 # ------------------------------------------------------------------
 
-ARG NGC_TAG=25.03-py3
+ARG NGC_TAG=26.03-py3
 ARG COMFY_REF=master
-ARG TORCHAUDIO_REF=v2.7.0
+ARG TORCHAUDIO_REF=v2.11.0
 ARG COMFY_AIMDO_REF=v0.2.12
 ARG COMFY_COMMIT=
 
@@ -384,8 +384,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 # - Consider cleaning /root/.cache after pip install to avoid leaving caches in layers.
 # ------------------------------------------------------------------
 COPY --from=build_torchaudio /tmp/wheels /tmp/wheels
-RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    ${VENV}/bin/python -m pip uninstall -y torchaudio || true \
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked ${VENV}/bin/python -m pip uninstall -y torchaudio || true \
  && ${VENV}/bin/python -m pip install --no-deps /tmp/wheels/torchaudio-*.whl \
  && rm -rf /tmp/wheels
 
@@ -396,8 +395,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 # - Validate that aimdo.so exists after installation
 # ------------------------------------------------------------------
 COPY --from=build_aimdo /tmp/wheels /tmp/wheels-aimdo
-RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    ${VENV}/bin/python -m pip uninstall -y comfy-aimdo || true \
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked ${VENV}/bin/python -m pip uninstall -y comfy-aimdo || true \
  && echo "=== stage-2 copied comfy-aimdo wheels ===" \
  && ls -l /tmp/wheels-aimdo \
  && WHEEL="$(find /tmp/wheels-aimdo -maxdepth 1 -type f -name 'comfy_aimdo-*.whl' | head -n1)" \

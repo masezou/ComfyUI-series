@@ -1,13 +1,13 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.7
 # ------------------------------------------------------------------
 # ComfyUI on NVIDIA CUDA base image (NGC)
 #
-# Design goals:
+# Goals:
 # - Use NVIDIA NGC CUDA image
-# - Install PyTorch CUDA wheels explicitly (torch/torchvision/torchaudio)
+# - Install explicit PyTorch CUDA wheels (torch/torchvision/torchaudio)
 # - Avoid optional CUDA extensions (xformers/flash-attn/triton builds)
 # - Install ComfyUI and its dependencies
-# - Build comfy-aimdo from source so aimdo.so is actually present and loadable
+# - Build comfy-aimdo from source so aimdo.so is present in the image
 # - Keep git available in the runtime image for ComfyUI-Manager / GitPython
 #
 # Notes:
@@ -17,6 +17,8 @@
 # - Default PyTorch wheel channel: cu128
 # - For CUDA 12.9.x / 13.x, PyTorch wheel channels may not map 1:1 to the container CUDA
 #   version. This file defaults to the selected PyTorch wheel channel intentionally.
+# - COMFY_COMMIT can be passed to pin an exact upstream ComfyUI revision.
+# - COMFY_CACHEBUST is kept as an emergency/manual layer invalidation knob.
 # ------------------------------------------------------------------
 
 ARG BUILDER_IMAGE=nvcr.io/nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04
@@ -24,24 +26,42 @@ ARG RUNTIME_IMAGE=nvcr.io/nvidia/cuda:12.9.1-runtime-ubuntu24.04
 ARG PYTORCH_CUDA=cu128
 ARG COMFY_REF=master
 ARG COMFY_AIMDO_REF=v0.2.12
+ARG COMFY_COMMIT=
 
-# ------------------------------------------------------------------
-# Builder stage
-# ------------------------------------------------------------------
+# ==================================================================
+# Stage 1: Builder (PyTorch wheels + ComfyUI deps)
+# ==================================================================
 FROM ${BUILDER_IMAGE} AS builder
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PYTORCH_CUDA
 ARG COMFY_REF
+ARG COMFY_COMMIT
 ARG COMFY_CACHEBUST=0
 
-ENV VENV=/opt/venv     PIP_NO_CACHE_DIR=1     PIP_DISABLE_PIP_VERSION_CHECK=1 TORCH_CUDA_ARCH_LIST=12.1
+ENV VENV=/opt/venv \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TORCH_CUDA_ARCH_LIST=12.1
 
-RUN apt-get update && apt-get install -y --no-install-recommends       ca-certificates curl       git       python3 python3-venv       python3-dev build-essential     && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl \
+      git \
+      python3 python3-venv \
+      python3-dev build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m venv ${VENV}  && ${VENV}/bin/python -m ensurepip --upgrade  && ${VENV}/bin/python -m pip install -U pip setuptools wheel  && ${VENV}/bin/python -m pip install -U GitPython uv  && rm -rf /root/.cache /tmp/*
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    python3 -m venv ${VENV} \
+ && ${VENV}/bin/python -m ensurepip --upgrade \
+ && ${VENV}/bin/python -m pip install -U pip setuptools wheel setuptools-scm \
+ && ${VENV}/bin/python -m pip install -U GitPython uv
 
-RUN ${VENV}/bin/python -m pip install -U       --index-url https://download.pytorch.org/whl/${PYTORCH_CUDA}       torch torchvision torchaudio  && rm -rf /root/.cache /tmp/*
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    ${VENV}/bin/python -m pip install -U \
+      --index-url https://download.pytorch.org/whl/${PYTORCH_CUDA} \
+      torch torchvision torchaudio
 
 RUN ${VENV}/bin/python - <<'PY2'
 import torch
@@ -51,12 +71,30 @@ assert torch.version.cuda is not None
 assert torch.backends.cuda.is_built()
 PY2
 
-RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}"  && git clone --branch "${COMFY_REF}" --single-branch       https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI  && rm -rf /opt/ComfyUI/.git
+RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
+ && echo "COMFY_REF=${COMFY_REF}" \
+ && echo "COMFY_COMMIT=${COMFY_COMMIT}" \
+ && git clone --filter=blob:none https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
+ && cd /opt/ComfyUI \
+ && if [ -n "${COMFY_COMMIT}" ]; then \
+      git fetch --depth 1 origin "${COMFY_COMMIT}" \
+      && git checkout --detach "${COMFY_COMMIT}"; \
+    else \
+      git checkout "${COMFY_REF}"; \
+    fi \
+ && git rev-parse HEAD
 
-RUN awk '!/^(torch|torchvision|torchaudio|comfy-aimdo)([<>= ].*)?$/ {print}'       /opt/ComfyUI/requirements.txt > /tmp/requirements.no_torch.txt  && ${VENV}/bin/python -m pip install -U -r /tmp/requirements.no_torch.txt  && ${VENV}/bin/python -m pip install -U sageattention  && rm -rf /root/.cache /tmp/*
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    cd /opt/ComfyUI \
+ && awk '!/^(torch|torchvision|torchaudio|comfy-aimdo)([<>= ].*)?$/ {print}' \
+      requirements.txt > /tmp/requirements.no_torch.txt \
+ && ${VENV}/bin/python -m pip install -U -r /tmp/requirements.no_torch.txt
+
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    ${VENV}/bin/python -m pip install -U --no-binary :all: sageattention
 
 # ==================================================================
-# Stage: build comfy-aimdo from source
+# Stage 1-B: Build comfy-aimdo from source
 # ==================================================================
 FROM ${BUILDER_IMAGE} AS build_aimdo
 
@@ -64,14 +102,51 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG COMFY_AIMDO_REF
 ARG TARGETARCH
 
-ENV VENV=/opt/venv     PIP_NO_CACHE_DIR=1     PIP_DISABLE_PIP_VERSION_CHECK=1 TORCH_CUDA_ARCH_LIST=12.1
+ENV VENV=/opt/venv \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TORCH_CUDA_ARCH_LIST=12.1
 
-RUN apt-get update && apt-get install -y --no-install-recommends       ca-certificates       git       python3 python3-venv       python3-dev build-essential       file     && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      git \
+      python3 python3-venv \
+      python3-dev build-essential \
+      file \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m venv ${VENV}  && ${VENV}/bin/python -m ensurepip --upgrade  && ${VENV}/bin/python -m pip install -U pip setuptools wheel setuptools-scm  && rm -rf /root/.cache /tmp/*
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    python3 -m venv ${VENV} \
+ && ${VENV}/bin/python -m ensurepip --upgrade \
+ && ${VENV}/bin/python -m pip install -U pip setuptools wheel setuptools-scm
 
-RUN git clone https://github.com/Comfy-Org/comfy-aimdo.git /tmp/comfy-aimdo  && cd /tmp/comfy-aimdo  && git checkout "${COMFY_AIMDO_REF}"  && ARCH="${TARGETARCH:-$(uname -m)}"  && case "${ARCH}" in       amd64|x86_64) CUDA_TARGET='x86_64-linux' ;;       arm64|aarch64) CUDA_TARGET='sbsa-linux' ;;       *) echo "Unsupported arch: ${ARCH}" >&2; exit 1 ;;     esac  && echo "ARCH=${ARCH} CUDA_TARGET=${CUDA_TARGET}"  && test -d "/usr/local/cuda/targets/${CUDA_TARGET}/include"  && test -d "/usr/local/cuda/targets/${CUDA_TARGET}/lib/stubs"  && test -f "/usr/local/cuda/targets/${CUDA_TARGET}/lib/stubs/libcuda.so"  && gcc -shared -O2 -fPIC       -I./src       -I"/usr/local/cuda/targets/${CUDA_TARGET}/include"       src/*.c src-posix/*.c       -L"/usr/local/cuda/targets/${CUDA_TARGET}/lib/stubs"       -Wl,--no-as-needed -lcuda -ldl -lpthread       -o comfy_aimdo/aimdo.so  && test -f comfy_aimdo/aimdo.so  && file comfy_aimdo/aimdo.so  && (ldd comfy_aimdo/aimdo.so || true)  && (readelf -d comfy_aimdo/aimdo.so | grep NEEDED || true)  && ${VENV}/bin/python - <<'PY2'
-import importlib.util
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    git clone https://github.com/Comfy-Org/comfy-aimdo.git /tmp/comfy-aimdo \
+ && cd /tmp/comfy-aimdo \
+ && git checkout "${COMFY_AIMDO_REF}" \
+ && ARCH="${TARGETARCH:-$(uname -m)}" \
+ && case "${ARCH}" in \
+      amd64|x86_64) CUDA_TARGET='x86_64-linux' ;; \
+      arm64|aarch64) CUDA_TARGET='sbsa-linux' ;; \
+      *) echo "Unsupported arch: ${ARCH}" >&2; exit 1 ;; \
+    esac \
+ && echo "ARCH=${ARCH} CUDA_TARGET=${CUDA_TARGET}" \
+ && test -d "/usr/local/cuda/targets/${CUDA_TARGET}/include" \
+ && test -d "/usr/local/cuda/targets/${CUDA_TARGET}/lib/stubs" \
+ && test -f "/usr/local/cuda/targets/${CUDA_TARGET}/lib/stubs/libcuda.so" \
+ && gcc -shared -O2 -fPIC \
+      -I./src \
+      -I"/usr/local/cuda/targets/${CUDA_TARGET}/include" \
+      src/*.c src-posix/*.c \
+      -L"/usr/local/cuda/targets/${CUDA_TARGET}/lib/stubs" \
+      -Wl,--no-as-needed -lcuda -ldl -lpthread \
+      -o comfy_aimdo/aimdo.so \
+ && test -f comfy_aimdo/aimdo.so \
+ && file comfy_aimdo/aimdo.so \
+ && (ldd comfy_aimdo/aimdo.so || true) \
+ && (readelf -d comfy_aimdo/aimdo.so | grep NEEDED || true) \
+ && ${VENV}/bin/python - <<'PY2'
 import os
 p = '/tmp/comfy-aimdo/comfy_aimdo/aimdo.so'
 print('artifact test =', p)
@@ -81,16 +156,25 @@ print('suffix =', os.path.splitext(p)[1])
 print('build-time CUDA-dependent dlopen test skipped (libcuda.so.1 is runtime-provided)')
 PY2
 
-RUN cd /tmp/comfy-aimdo  && mkdir -p /tmp/wheels  && ${VENV}/bin/python -m pip wheel . --no-deps --no-build-isolation -w /tmp/wheels  && echo '=== build_aimdo wheel output ==='  && ls -l /tmp/wheels  && find /tmp/wheels -maxdepth 1 -type f -name 'comfy_aimdo-*.whl' -print  && test -n "$(find /tmp/wheels -maxdepth 1 -type f -name 'comfy_aimdo-*.whl' | head -n1)"
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    cd /tmp/comfy-aimdo \
+ && mkdir -p /tmp/wheels \
+ && ${VENV}/bin/python -m pip wheel . --no-deps --no-build-isolation -w /tmp/wheels \
+ && echo '=== build_aimdo wheel output ===' \
+ && ls -l /tmp/wheels \
+ && find /tmp/wheels -maxdepth 1 -type f -name 'comfy_aimdo-*.whl' -print \
+ && test -n "$(find /tmp/wheels -maxdepth 1 -type f -name 'comfy_aimdo-*.whl' | head -n1)"
 
-# =========================
-# runtime (final image)
-# =========================
+# ==================================================================
+# Stage 2: Runtime (final image)
+# ==================================================================
 FROM ${RUNTIME_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       git \
       python3 \
@@ -105,7 +189,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV PATH="/opt/venv/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     VENV=/opt/venv \
     VIRTUAL_ENV=/opt/venv \
-    TORCH_CUDA_ARCH_LIST=12.1 \
     PYTHONUNBUFFERED=1 \
     TRITON_CACHE_DIR=/opt/venv/.cache/triton \
     COMFY_LISTEN=0.0.0.0 \
@@ -128,7 +211,16 @@ COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /opt/ComfyUI /opt/ComfyUI
 COPY --from=build_aimdo /tmp/wheels /tmp/wheels-aimdo
 
-RUN ${VENV}/bin/python -m pip uninstall -y comfy-aimdo || true  && echo '=== stage-2 copied comfy-aimdo wheels ==='  && ls -l /tmp/wheels-aimdo  && WHEEL="$(find /tmp/wheels-aimdo -maxdepth 1 -type f -name 'comfy_aimdo-*.whl' | head -n1)"  && test -n "${WHEEL}"  && echo "Using wheel: ${WHEEL}"  && ${VENV}/bin/python -m pip install --no-deps "${WHEEL}"  && rm -rf /tmp/wheels-aimdo  && ${VENV}/bin/python - <<'PY2'
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    ${VENV}/bin/python -m pip uninstall -y comfy-aimdo || true \
+ && echo '=== stage-2 copied comfy-aimdo wheels ===' \
+ && ls -l /tmp/wheels-aimdo \
+ && WHEEL="$(find /tmp/wheels-aimdo -maxdepth 1 -type f -name 'comfy_aimdo-*.whl' | head -n1)" \
+ && test -n "${WHEEL}" \
+ && echo "Using wheel: ${WHEEL}" \
+ && ${VENV}/bin/python -m pip install --no-deps "${WHEEL}" \
+ && rm -rf /tmp/wheels-aimdo \
+ && ${VENV}/bin/python - <<'PY2'
 import importlib.util
 import os
 import comfy_aimdo

@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.7
 # ------------------------------------------------------------------
 # ComfyUI on NVIDIA NGC PyTorch base image (NGC / NVIDIA-VALIDATED STACK)
 #
@@ -42,6 +42,7 @@ ARG NGC_TAG=25.11-py3
 ARG COMFY_REF=master
 ARG TORCHAUDIO_REF=v2.9.1
 ARG COMFY_AIMDO_REF=v0.2.12
+ARG COMFY_COMMIT=
 
 # ==================================================================
 # Stage 1: Build torchaudio CPU-only wheel from source
@@ -83,7 +84,9 @@ ARG TORCHAUDIO_REF
 # - python3-full is noticeably larger than python3. If you ever relax the
 #   "code must not change" rule, consider testing python3 + required modules only.
 # ------------------------------------------------------------------
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates \
       build-essential cmake ninja-build pkg-config \
       python3-venv python3-full \
@@ -99,7 +102,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # - Consider disabling pip cache via ENV PIP_NO_CACHE_DIR=1 to reduce layer bloat.
 # ------------------------------------------------------------------
 ENV VENV=/opt/venv
-RUN python3 -m venv --system-site-packages ${VENV} \
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    python3 -m venv --system-site-packages ${VENV} \
  && ${VENV}/bin/python -m ensurepip --upgrade \
  && ${VENV}/bin/python -m pip install -U pip setuptools wheel setuptools-scm
 
@@ -137,7 +141,8 @@ PY
 # - This stage may keep large build trees under /tmp/torchaudio unless removed.
 #   If later optimizing, removing /tmp/torchaudio and pip caches after wheel build helps.
 # ------------------------------------------------------------------
-RUN export MAX_JOBS=2 CMAKE_BUILD_PARALLEL_LEVEL=2 NINJA_FLAGS="-j2" \
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export MAX_JOBS=2 CMAKE_BUILD_PARALLEL_LEVEL=2 NINJA_FLAGS="-j2" \
  && git clone --recursive https://github.com/pytorch/audio.git /tmp/torchaudio \
  && cd /tmp/torchaudio \
  && git checkout "${TORCHAUDIO_REF}" \
@@ -165,7 +170,9 @@ FROM nvcr.io/nvidia/pytorch:${NGC_TAG} AS build_aimdo
 ARG DEBIAN_FRONTEND=noninteractive
 ARG COMFY_AIMDO_REF
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates \
       build-essential \
       python3-venv python3-full \
@@ -173,7 +180,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 ENV VENV=/opt/venv
-RUN python3 -m venv --system-site-packages ${VENV} \
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    python3 -m venv --system-site-packages ${VENV} \
  && ${VENV}/bin/python -m ensurepip --upgrade \
  && ${VENV}/bin/python -m pip install -U pip setuptools wheel setuptools-scm
 
@@ -189,7 +197,8 @@ RUN python3 -m venv --system-site-packages ${VENV} \
 # - We link against CUDA stub libcuda during build.
 # - Runtime resolution will use the real NVIDIA driver library provided by the container runtime.
 # ------------------------------------------------------------------
-RUN git clone https://github.com/Comfy-Org/comfy-aimdo.git /tmp/comfy-aimdo \
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    git clone https://github.com/Comfy-Org/comfy-aimdo.git /tmp/comfy-aimdo \
  && cd /tmp/comfy-aimdo \
  && git checkout "${COMFY_AIMDO_REF}" \
  && ARCH="$(uname -m)" \
@@ -245,6 +254,7 @@ FROM nvcr.io/nvidia/pytorch:${NGC_TAG}
 # ------------------------------------------------------------------
 ARG DEBIAN_FRONTEND=noninteractive
 ARG COMFY_REF
+ARG COMFY_COMMIT
 
 # ------------------------------------------------------------------
 # Install runtime system dependencies
@@ -260,7 +270,9 @@ ARG COMFY_REF
 # - git-lfs and python3-full can be significant; keep only if really needed.
 # - If you do not use git-lfs inside the container, removing it reduces size.
 # ------------------------------------------------------------------
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl \
       python3-venv python3-full \
       ffmpeg \
@@ -305,7 +317,8 @@ PY
 # - Consider setting PIP_NO_CACHE_DIR=1 and cleaning /root/.cache after pip installs.
 # ------------------------------------------------------------------
 ENV VENV=/opt/venv
-RUN python3 -m venv --system-site-packages ${VENV} \
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    python3 -m venv --system-site-packages ${VENV} \
  && ${VENV}/bin/python -m ensurepip --upgrade \
  && ${VENV}/bin/python -m pip install -U pip setuptools wheel setuptools-scm \
  && ${VENV}/bin/python -m pip install -U GitPython uv
@@ -341,12 +354,25 @@ RUN python3 -m venv --system-site-packages ${VENV} \
 # ------------------------------------------------------------------
 ARG COMFY_CACHEBUST=0
 RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
- && git clone https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
+ && echo "COMFY_REF=${COMFY_REF}" \
+ && echo "COMFY_COMMIT=${COMFY_COMMIT}" \
+ && git clone --filter=blob:none https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
  && cd /opt/ComfyUI \
- && git checkout "${COMFY_REF}" \
+ && if [ -n "${COMFY_COMMIT}" ]; then \
+      git fetch --depth 1 origin "${COMFY_COMMIT}" \
+      && git checkout --detach "${COMFY_COMMIT}"; \
+    else \
+      git checkout "${COMFY_REF}"; \
+    fi \
+ && git rev-parse HEAD
+
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    cd /opt/ComfyUI \
  && awk '!/^(torch|torchvision|torchaudio|comfy-aimdo)([<>= ].*)?$/ {print}' requirements.txt > /tmp/requirements.no_torch.txt \
- && ${VENV}/bin/python -m pip install -U -r /tmp/requirements.no_torch.txt \
- && ${VENV}/bin/python -m pip install -U sageattention
+ && ${VENV}/bin/python -m pip install -U -r /tmp/requirements.no_torch.txt
+
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    ${VENV}/bin/python -m pip install -U --no-binary :all: sageattention
 
 # ------------------------------------------------------------------
 # Install torchaudio from wheel built in Stage 1
@@ -358,7 +384,8 @@ RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
 # - Consider cleaning /root/.cache after pip install to avoid leaving caches in layers.
 # ------------------------------------------------------------------
 COPY --from=build_torchaudio /tmp/wheels /tmp/wheels
-RUN ${VENV}/bin/python -m pip uninstall -y torchaudio || true \
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    ${VENV}/bin/python -m pip uninstall -y torchaudio || true \
  && ${VENV}/bin/python -m pip install --no-deps /tmp/wheels/torchaudio-*.whl \
  && rm -rf /tmp/wheels
 
@@ -369,7 +396,8 @@ RUN ${VENV}/bin/python -m pip uninstall -y torchaudio || true \
 # - Validate that aimdo.so exists after installation
 # ------------------------------------------------------------------
 COPY --from=build_aimdo /tmp/wheels /tmp/wheels-aimdo
-RUN ${VENV}/bin/python -m pip uninstall -y comfy-aimdo || true \
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    ${VENV}/bin/python -m pip uninstall -y comfy-aimdo || true \
  && echo "=== stage-2 copied comfy-aimdo wheels ===" \
  && ls -l /tmp/wheels-aimdo \
  && WHEEL="$(find /tmp/wheels-aimdo -maxdepth 1 -type f -name 'comfy_aimdo-*.whl' | head -n1)" \

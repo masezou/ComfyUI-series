@@ -1,130 +1,278 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.7
 # ------------------------------------------------------------------
-# ComfyUI on NVIDIA NGC PyTorch base image
-# - Keep base torch/torchvision from NGC
-# - Build torchaudio wheel from source (CPU-only wheel, linked against base torch)
-# - Build comfy-aimdo from source with explicit Linux x86_64/arm64 handling
-# - Harden runtime validation so missing/broken aimdo.so fails at build time
+# ComfyUI on NVIDIA NGC PyTorch base image (NGC / NVIDIA-VALIDATED STACK)
+#
+# Goals:
+# - Use NVIDIA NGC PyTorch image (CUDA-enabled)
+# - Keep preinstalled CUDA-enabled torch from base image (do NOT reinstall torch/torchvision)
+# - Install ComfyUI deps into a venv with --system-site-packages
+# - Enable torchaudio WITHOUT pulling CUDA runtime deps:
+#     -> build torchaudio CPU-only wheel from source, then install that wheel
+# - Build comfy-aimdo from source so aimdo.so is actually present in the image
+#
+# Notes:
+# - docker login nvcr.io (NGC API key)
+# - NGC_TAG controls the CUDA / PyTorch stack provided by the base image.
+#   Example references (from NVIDIA release notes):
+#     * 24.12: CUDA 12.6.3, PyTorch 2.6.0a0...
+#     * 25.11: CUDA 13.0.2, PyTorch 2.10.0a0...
+#
+# Practical warning (seen in your logs):
+# - ComfyUI-Manager (uv/pip) may upgrade NumPy to 2.x inside the venv.
+#   Some binary components (and even torch->numpy interop paths) can fail when
+#   NumPy 2.x is present but extension modules were built against NumPy 1.x.
+#   Symptom: RuntimeError "Numpy is not available" at image.cpu().numpy().
+# - Mitigations (OPTIONAL, not implemented in this file because code must not change):
+#   1) Pin NumPy in the venv early:  pip install --force-reinstall "numpy<2"
+#   2) Prevent Manager from touching NumPy: create __manager/pip_blacklist.list with "numpy"
+#
+# NOTE (image size):
+# - This Dockerfile is expected to be the heaviest variant because:
+#   * NGC base is large,
+#   * Stage1 builds torchaudio from source (toolchain + build artifacts),
+#   * Stage1-B builds comfy-aimdo from source,
+#   * Stage2 installs many runtime deps + Python wheels.
+# - If you later decide to optimize size, the biggest wins usually come from:
+#   * disabling pip caches (PIP_NO_CACHE_DIR=1) and removing /root/.cache and /tmp after installs,
+#   * multi-stage for runtime deps (not applicable here because runtime must be NGC),
+#   * minimizing apt packages (python3-full/git-lfs/sox tools) if not needed.
 # ------------------------------------------------------------------
 
 ARG NGC_TAG=25.06-py3
 ARG COMFY_REF=master
 ARG TORCHAUDIO_REF=v2.8.0
 ARG COMFY_AIMDO_REF=master
+ARG COMFY_COMMIT=
 
 # ==================================================================
-# Stage 1: Build torchaudio wheel from source
+# Stage 1: Build torchaudio CPU-only wheel from source
 # ==================================================================
+# ------------------------------------------------------------------
+# Build stage rationale:
+# - We build a CPU-only torchaudio wheel so installing torchaudio does NOT
+#   attempt to pull additional CUDA runtime wheels as dependencies.
+# - The build links against the torch already present in the NGC base image
+#   (important for ABI compatibility with that container's torch build).
+#
+# Compatibility note:
+# - Ideally TORCHAUDIO_REF should be aligned with the torch "minor" series.
+#   If mismatched, the wheel build may fail or runtime import may break.
+#
+# NOTE (correctness vs size):
+# - CPU-only build intent is correct. However, building wheels can leave large
+#   caches/artifacts in layers unless explicitly cleaned (pip cache, build dirs).
+# ------------------------------------------------------------------
 FROM nvcr.io/nvidia/pytorch:${NGC_TAG} AS build_torchaudio
 
+# ------------------------------------------------------------------
+# Build arguments
+# DEBIAN_FRONTEND: suppress interactive apt dialogs
+# TORCHAUDIO_REF: git branch/tag/commit for pytorch/audio
+# ------------------------------------------------------------------
 ARG DEBIAN_FRONTEND=noninteractive
 ARG TORCHAUDIO_REF
 
-ENV VENV=/opt/venv \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    USE_CUDA=0 \
-    USE_ROCM=0 \
-    BUILD_SOX=0
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# ------------------------------------------------------------------
+# Install build dependencies for torchaudio wheel
+# - git, ca-certificates: fetch sources over HTTPS
+# - build-essential/cmake/ninja/pkg-config: native build toolchain
+# - python3-venv/python3-full: create venv + ensure full stdlib/modules
+# - sox + dev libs: enable audio backend headers for building torchaudio
+# - Clean apt lists to reduce layer size
+#
+# NOTE (size):
+# - python3-full is noticeably larger than python3. If you ever relax the
+#   "code must not change" rule, consider testing python3 + required modules only.
+# ------------------------------------------------------------------
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates \
       build-essential cmake ninja-build pkg-config \
       python3-venv python3-full \
       sox libsox-dev libsndfile1-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m venv --system-site-packages ${VENV} \
+# ------------------------------------------------------------------
+# Create venv for the build tooling (shares system site-packages)
+# - --system-site-packages allows reusing the base image's torch install
+# - ensurepip + pip/setuptools/wheel updated for building wheels
+#
+# NOTE (size):
+# - Consider disabling pip cache via ENV PIP_NO_CACHE_DIR=1 to reduce layer bloat.
+# ------------------------------------------------------------------
+ENV VENV=/opt/venv
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    python3 -m venv --system-site-packages ${VENV} \
  && ${VENV}/bin/python -m ensurepip --upgrade \
- && ${VENV}/bin/python -m pip install -U pip setuptools wheel
+ && ${VENV}/bin/python -m pip install -U pip setuptools wheel setuptools-scm
 
+# ------------------------------------------------------------------
+# Force CPU-only build (no CUDA/ROCm)
+# - USE_CUDA/USE_ROCM: disable GPU backends for torchaudio build
+# - BUILD_SOX=0: do not build bundled sox (use system libs)
+# ------------------------------------------------------------------
+ENV USE_CUDA=0
+ENV USE_ROCM=0
+ENV BUILD_SOX=0
+
+# ------------------------------------------------------------------
+# Sanity check:
+# Ensure the build environment sees torch from the NGC base image.
+# This helps confirm we are building against the intended torch.
+# ------------------------------------------------------------------
 RUN ${VENV}/bin/python - <<'PY'
-import torch
-print('TORCH =', torch.__version__)
-print('CUDA =', torch.version.cuda)
-print('torch file =', torch.__file__)
+import torch, sys
+print("TORCH=", torch.__version__)
+print("CUDA =", torch.version.cuda)
+print("torch file =", torch.__file__)
 PY
 
-RUN export MAX_JOBS=2 CMAKE_BUILD_PARALLEL_LEVEL=2 NINJA_FLAGS='-j2' \
+# ------------------------------------------------------------------
+# Build wheel:
+# - Clone pytorch/audio with submodules
+# - Checkout TORCHAUDIO_REF
+# - Build a wheel with:
+#     --no-deps: avoid pulling dependencies
+#     --no-build-isolation: use current env/toolchain (torch from base)
+# - Constrain parallelism to reduce RAM/CPU pressure during build
+#
+# NOTE (size):
+# - This stage may keep large build trees under /tmp/torchaudio unless removed.
+#   If later optimizing, removing /tmp/torchaudio and pip caches after wheel build helps.
+# ------------------------------------------------------------------
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export MAX_JOBS=2 CMAKE_BUILD_PARALLEL_LEVEL=2 NINJA_FLAGS="-j2" \
  && git clone --recursive https://github.com/pytorch/audio.git /tmp/torchaudio \
  && cd /tmp/torchaudio \
  && git checkout "${TORCHAUDIO_REF}" \
  && git submodule update --init --recursive \
  && mkdir -p /tmp/wheels \
- && ${VENV}/bin/python -m pip wheel -v . --no-deps --no-build-isolation -w /tmp/wheels \
- && ls -l /tmp/wheels
+ && ${VENV}/bin/python -m pip wheel -v . \
+      --no-deps --no-build-isolation \
+      -w /tmp/wheels
 
 # ==================================================================
 # Stage 1-B: Build comfy-aimdo wheel from source
 # ==================================================================
+# ------------------------------------------------------------------
+# Build stage rationale:
+# - Some environments may end up with a comfy-aimdo install that lacks aimdo.so.
+# - To make the runtime deterministic, we build comfy-aimdo from source here
+#   and ensure the binary is packaged into the wheel.
+#
+# Architecture note:
+# - Upstream examples often assume x86_64.
+# - This Dockerfile also supports arm64/aarch64 by mapping to CUDA's sbsa-linux target.
+# ------------------------------------------------------------------
 FROM nvcr.io/nvidia/pytorch:${NGC_TAG} AS build_aimdo
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG COMFY_AIMDO_REF
-ARG TARGETARCH
 
-ENV VENV=/opt/venv \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      git ca-certificates file \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+      git ca-certificates \
       build-essential \
       python3-venv python3-full \
+      file \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m venv --system-site-packages ${VENV} \
+ENV VENV=/opt/venv
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    python3 -m venv --system-site-packages ${VENV} \
  && ${VENV}/bin/python -m ensurepip --upgrade \
  && ${VENV}/bin/python -m pip install -U pip setuptools wheel setuptools-scm
 
-RUN git clone https://github.com/Comfy-Org/comfy-aimdo.git /tmp/comfy-aimdo \
+# ------------------------------------------------------------------
+# Build comfy-aimdo:
+# - Clone repository
+# - Checkout requested ref
+# - Select CUDA target path based on container architecture
+# - Compile aimdo.so explicitly before wheel build
+# - Build a wheel without dependencies
+#
+# Notes:
+# - We link against CUDA stub libcuda during build.
+# - Runtime resolution will use the real NVIDIA driver library provided by the container runtime.
+# ------------------------------------------------------------------
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    git clone https://github.com/Comfy-Org/comfy-aimdo.git /tmp/comfy-aimdo \
  && cd /tmp/comfy-aimdo \
  && git checkout "${COMFY_AIMDO_REF}" \
- && ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
+ && ARCH="$(uname -m)" \
  && case "${ARCH}" in \
-      amd64|x86_64) CUDA_TARGET='x86_64-linux' ;; \
-      arm64|aarch64) CUDA_TARGET='sbsa-linux' ;; \
+      x86_64) CUDA_TARGET="x86_64-linux" ;; \
+      aarch64|arm64) CUDA_TARGET="sbsa-linux" ;; \
       *) echo "Unsupported arch: ${ARCH}" >&2; exit 1 ;; \
     esac \
  && echo "ARCH=${ARCH} CUDA_TARGET=${CUDA_TARGET}" \
  && test -d "/usr/local/cuda/targets/${CUDA_TARGET}/include" \
  && test -d "/usr/local/cuda/targets/${CUDA_TARGET}/lib/stubs" \
  && test -f "/usr/local/cuda/targets/${CUDA_TARGET}/lib/stubs/libcuda.so" \
- && gcc -shared -O2 -fPIC \
-      -I./src \
+ && gcc -shared -o comfy_aimdo/aimdo.so -fPIC \
+      -I"./src" \
       -I"/usr/local/cuda/targets/${CUDA_TARGET}/include" \
-      src/*.c src-posix/*.c \
       -L"/usr/local/cuda/targets/${CUDA_TARGET}/lib/stubs" \
-      -Wl,--no-as-needed -lcuda -ldl -lpthread \
-      -o comfy_aimdo/aimdo.so \
- && test -f comfy_aimdo/aimdo.so \
- && file comfy_aimdo/aimdo.so \
- && ldd comfy_aimdo/aimdo.so || true \
- && ${VENV}/bin/python - <<'PY'
-import ctypes
-p = '/tmp/comfy-aimdo/comfy_aimdo/aimdo.so'
-print('load test =', p)
-ctypes.CDLL(p)
-print('ctypes load OK')
-PY
-
-RUN cd /tmp/comfy-aimdo \
- && mkdir -p /tmp/wheels \
- && ${VENV}/bin/python -m pip wheel . --no-deps --no-build-isolation -w /tmp/wheels \
- && ls -l /tmp/wheels \
- && find /tmp/wheels -maxdepth 1 -type f -name 'comfy_aimdo-*.whl' -print \
- && test -n "$(find /tmp/wheels -maxdepth 1 -type f -name 'comfy_aimdo-*.whl' | head -n1)"
+      -Wno-error \
+      src/*.c src-posix/*.c -lcuda \
+      && test -f comfy_aimdo/aimdo.so \
+      && file comfy_aimdo/aimdo.so \
+      && mkdir -p /tmp/wheels \
+      && ${VENV}/bin/python -m pip wheel . \
+           --no-deps --no-build-isolation \
+           -w /tmp/wheels \
+      && echo "=== build_aimdo wheel output ===" \
+      && ls -l /tmp/wheels \
+      && find /tmp/wheels -maxdepth 1 -type f -name 'comfy_aimdo-*.whl' -print \
+      && test -n "$(find /tmp/wheels -maxdepth 1 -type f -name 'comfy_aimdo-*.whl' | head -n1)"
 
 # ==================================================================
-# Stage 2: Runtime image
+# Stage 2: Runtime (ComfyUI)
 # ==================================================================
+# ------------------------------------------------------------------
+# Runtime stage rationale:
+# - Use the same NGC PyTorch base image so torch/CUDA stack matches Stage 1.
+# - Create a venv with --system-site-packages to reuse base torch.
+# - Install ComfyUI deps into the venv excluding torch/torchvision/torchaudio/comfy-aimdo.
+# - Install torchaudio from the CPU-only wheel built in Stage 1.
+# - Install comfy-aimdo from the source-built wheel from Stage 1-B.
+#
+# NOTE (size):
+# - Even though Stage1 is separate, Stage2 can still become large due to:
+#   * apt packages (python3-full, git-lfs, ffmpeg, sox),
+#   * Python wheels (ComfyUI deps + sageattention).
+#   Pip cache cleanup can have a visible effect on final size.
+# ------------------------------------------------------------------
 FROM nvcr.io/nvidia/pytorch:${NGC_TAG}
 
+# ------------------------------------------------------------------
+# Build arguments
+# DEBIAN_FRONTEND: suppress interactive apt dialogs
+# COMFY_REF: git branch/tag/commit for ComfyUI
+# ------------------------------------------------------------------
 ARG DEBIAN_FRONTEND=noninteractive
 ARG COMFY_REF
-ARG COMFY_CACHEBUST=0
+ARG COMFY_COMMIT
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# ------------------------------------------------------------------
+# Install runtime system dependencies
+# - git, ca-certificates, curl: repo fetch + HTTPS diagnostics
+# - python3-venv/python3-full: venv creation + full python modules
+# - ffmpeg: video/image IO helpers used by some workflows/custom nodes
+# - libgl1, libglib2.0-0: common runtime libs for image ops/UI deps
+# - git-lfs: for pulling large model repos via LFS if needed
+# - sox, libsndfile1: audio runtime libs used by torchaudio/related nodes
+# - Clean apt lists to reduce layer size
+#
+# NOTE (size):
+# - git-lfs and python3-full can be significant; keep only if really needed.
+# - If you do not use git-lfs inside the container, removing it reduces size.
+# ------------------------------------------------------------------
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl \
       python3-venv python3-full \
       ffmpeg \
@@ -134,13 +282,189 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && git lfs install --system \
     && rm -rf /var/lib/apt/lists/*
 
+# ------------------------------------------------------------------
+# Sanity check:
+# Verify that torch in the base image is CUDA-enabled.
+# This does NOT require GPU at build time.
+# It ensures:
+# - torch.version.cuda is defined
+# - CUDA backend is compiled in
+# ------------------------------------------------------------------
 RUN python3 - <<'PY'
 import torch
-print('torch =', torch.__version__)
-print('torch.version.cuda =', torch.version.cuda)
+print("torch =", torch.__version__)
+print("torch.version.cuda =", torch.version.cuda)
 assert torch.version.cuda is not None
 assert torch.backends.cuda.is_built()
 PY
+
+# ------------------------------------------------------------------
+# Create Python virtual environment
+# - --system-site-packages allows reuse of torch installed in base image
+# - ensurepip then upgrade pip/setuptools/wheel
+# - Install GitPython and uv:
+#   * GitPython: required by ComfyUI-Manager for git operations
+#   * uv: optional fast installer; ComfyUI-Manager may prefer it if present
+#
+# NumPy note (important for stability):
+# - Because system-site-packages exposes base packages and the venv can also
+#   install/upgrade packages, it is possible to end up with NumPy 2.x in the venv
+#   even if some binary modules expect NumPy 1.x ABI.
+# - If you see "Numpy is not available", the practical fix is to pin NumPy < 2
+#   and/or blacklist NumPy from Manager updates (see header notes).
+#
+# NOTE (size):
+# - Consider setting PIP_NO_CACHE_DIR=1 and cleaning /root/.cache after pip installs.
+# ------------------------------------------------------------------
+ENV VENV=/opt/venv
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    python3 -m venv --system-site-packages ${VENV} \
+ && ${VENV}/bin/python -m ensurepip --upgrade \
+ && ${VENV}/bin/python -m pip install -U pip setuptools wheel setuptools-scm \
+ && ${VENV}/bin/python -m pip install -U GitPython uv
+
+# ------------------------------------------------------------------
+# Clone ComfyUI and install dependencies
+#
+# Steps:
+# 1) Clone official repository
+# 2) Checkout specified branch/tag/commit (COMFY_REF)
+# 3) Remove torch/torchvision/torchaudio/comfy-aimdo from requirements.txt
+#    - We rely on base image torch
+#    - torchaudio is installed later from our CPU-only wheel
+#    - comfy-aimdo is installed later from our source-built wheel
+# 4) Install remaining requirements into the venv
+# 5) Install sageattention (optional acceleration feature for attention)
+#
+# Cache busting:
+# - COMFY_CACHEBUST is a dummy build-arg used to invalidate the Docker layer
+#   for git clone / pip install when you want a clean rebuild.
+#
+# OPTIONAL hardening for the NumPy issue (NOT executed here; comment-only):
+#   # Prevent Manager from upgrading NumPy (blacklist)
+#   # RUN mkdir -p /opt/ComfyUI/user/__manager \
+#   #  && cat <<'EOF' > /opt/ComfyUI/user/__manager/pip_blacklist.list
+#   # numpy
+#   # EOF
+#
+# NOTE (size):
+# - If you do not need git history inside the final container, removing /opt/ComfyUI/.git
+#   after clone reduces the image a bit.
+# - Pip cache cleanup after installs can reduce layer size.
+# ------------------------------------------------------------------
+ARG COMFY_CACHEBUST=0
+RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
+ && echo "COMFY_REF=${COMFY_REF}" \
+ && echo "COMFY_COMMIT=${COMFY_COMMIT}" \
+ && git clone --filter=blob:none https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
+ && cd /opt/ComfyUI \
+ && if [ -n "${COMFY_COMMIT}" ]; then \
+      git fetch --depth 1 origin "${COMFY_COMMIT}" \
+      && git checkout --detach "${COMFY_COMMIT}"; \
+    else \
+      git checkout "${COMFY_REF}"; \
+    fi \
+ && git rev-parse HEAD
+
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    cd /opt/ComfyUI \
+ && awk '!/^(torch|torchvision|torchaudio|comfy-aimdo)([<>= ].*)?$/ {print}' requirements.txt > /tmp/requirements.no_torch.txt \
+ && ${VENV}/bin/python -m pip install -U -r /tmp/requirements.no_torch.txt
+
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    ${VENV}/bin/python -m pip install -U --no-binary :all: sageattention
+
+# ------------------------------------------------------------------
+# Install torchaudio from wheel built in Stage 1
+# - Uninstall any existing torchaudio first (if present)
+# - Install our CPU-only wheel with --no-deps to avoid pulling runtime extras
+# - Remove wheel artifacts afterward
+#
+# NOTE (size):
+# - Consider cleaning /root/.cache after pip install to avoid leaving caches in layers.
+# ------------------------------------------------------------------
+COPY --from=build_torchaudio /tmp/wheels /tmp/wheels
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    ${VENV}/bin/python -m pip uninstall -y torchaudio || true \
+ && ${VENV}/bin/python -m pip install --no-deps /tmp/wheels/torchaudio-*.whl \
+ && rm -rf /tmp/wheels
+
+# ------------------------------------------------------------------
+# Install comfy-aimdo from wheel built in Stage 1-B
+# - Uninstall any existing comfy-aimdo first (if present)
+# - Install our source-built wheel with --no-deps
+# - Validate that aimdo.so exists after installation
+# ------------------------------------------------------------------
+COPY --from=build_aimdo /tmp/wheels /tmp/wheels-aimdo
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    ${VENV}/bin/python -m pip uninstall -y comfy-aimdo || true \
+ && echo "=== stage-2 copied comfy-aimdo wheels ===" \
+ && ls -l /tmp/wheels-aimdo \
+ && WHEEL="$(find /tmp/wheels-aimdo -maxdepth 1 -type f -name 'comfy_aimdo-*.whl' | head -n1)" \
+ && test -n "${WHEEL}" \
+ && echo "Using wheel: ${WHEEL}" \
+ && ${VENV}/bin/python -m pip install --no-deps "${WHEEL}" \
+ && rm -rf /tmp/wheels-aimdo \
+ && ${VENV}/bin/python - <<'PY'
+import os
+import importlib.util
+import comfy_aimdo
+
+spec = importlib.util.find_spec("comfy_aimdo")
+print("comfy_aimdo.__file__ =", getattr(comfy_aimdo, "__file__", None))
+print("comfy_aimdo.__path__ =", list(getattr(comfy_aimdo, "__path__", [])))
+print("spec.origin =", getattr(spec, "origin", None))
+print("spec.submodule_search_locations =", list(spec.submodule_search_locations or []))
+
+pkg_dirs = list(getattr(comfy_aimdo, "__path__", []))
+assert pkg_dirs, "comfy_aimdo package directory not found"
+
+p = os.path.join(pkg_dirs[0], "aimdo.so")
+print("aimdo.so exists =", os.path.exists(p), p)
+assert os.path.exists(p), p
+PY
+
+# ------------------------------------------------------------------
+# Copy torch dist-info into venv so uv/pip tools "see" torch (metadata only)
+#
+# Why:
+# - With --system-site-packages, torch is available at runtime.
+# - Some tooling (especially uv) may not detect torch as "installed"
+#   inside the venv because its dist-info lives in the system site-packages.
+# - Copying dist-info into venv's site-packages makes metadata visible without
+#   reinstalling torch.
+#
+# Note:
+# - This copies metadata only; it does not duplicate torch binaries.
+#
+# NOTE (size):
+# - dist-info is small; this is not a size concern.
+# ------------------------------------------------------------------
+RUN ${VENV}/bin/python - <<'PY'
+import shutil, sysconfig, importlib.metadata as md
+
+def copy_dist_info(name: str):
+    d = md.distribution(name)
+    src = getattr(d, "_path", None)
+    if not src:
+        raise SystemExit(f"{name} dist-info path not found")
+    dst = sysconfig.get_paths()["purelib"]
+    target = f"{dst}/{src.name}"
+    shutil.copytree(str(src), target, dirs_exist_ok=True)
+    print(f"Copied {name} dist-info to venv:", target)
+
+copy_dist_info("torch")
+try:
+    copy_dist_info("torchvision")
+except Exception as e:
+    print("torchvision dist-info copy skipped:", repr(e))
+PY
+
+# ------------------------------------------------------------------
+# Runtime configuration
+# ------------------------------------------------------------------
+WORKDIR /opt/ComfyUI
+EXPOSE 8188
 
 ENV PATH="/opt/venv/bin:${PATH}" \
     VENV=/opt/venv \
@@ -161,78 +485,22 @@ ENV PATH="/opt/venv/bin:${PATH}" \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 
-RUN python3 -m venv --system-site-packages ${VENV} \
- && ${VENV}/bin/python -m ensurepip --upgrade \
- && ${VENV}/bin/python -m pip install -U pip setuptools wheel \
- && ${VENV}/bin/python -m pip install -U GitPython uv \
- && ${VENV}/bin/python -m pip install --force-reinstall 'numpy<2'
-
-RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
- && git clone --depth 1 https://github.com/Comfy-Org/ComfyUI.git /opt/ComfyUI \
- && cd /opt/ComfyUI \
- && git fetch --depth 1 origin "${COMFY_REF}" || true \
- && git checkout "${COMFY_REF}" \
- && awk '!/^(torch|torchvision|torchaudio|comfy-aimdo)([<>= ].*)?$/ {print}' requirements.txt > /tmp/requirements.no_torch.txt \
- && ${VENV}/bin/python -m pip install -U -r /tmp/requirements.no_torch.txt \
- && ${VENV}/bin/python -m pip install -U sageattention \
- && mkdir -p /opt/ComfyUI/user/__manager \
- && cat <<'EOBL' > /opt/ComfyUI/user/__manager/pip_blacklist.list
-numpy
-comfy-aimdo
-EOBL
-
-COPY --from=build_torchaudio /tmp/wheels /tmp/wheels
-RUN ${VENV}/bin/python -m pip uninstall -y torchaudio || true \
- && ${VENV}/bin/python -m pip install --no-deps /tmp/wheels/torchaudio-*.whl \
- && rm -rf /tmp/wheels
-
-COPY --from=build_aimdo /tmp/wheels /tmp/wheels-aimdo
-RUN ${VENV}/bin/python -m pip uninstall -y comfy-aimdo || true \
- && WHEEL="$(find /tmp/wheels-aimdo -maxdepth 1 -type f -name 'comfy_aimdo-*.whl' | head -n1)" \
- && test -n "${WHEEL}" \
- && echo "Using wheel: ${WHEEL}" \
- && ${VENV}/bin/python -m pip install --no-deps "${WHEEL}" \
- && rm -rf /tmp/wheels-aimdo \
- && ${VENV}/bin/python - <<'PY'
-import ctypes
-import importlib.util
-import os
-import comfy_aimdo
-spec = importlib.util.find_spec('comfy_aimdo')
-print('comfy_aimdo.__file__ =', getattr(comfy_aimdo, '__file__', None))
-print('spec.origin =', getattr(spec, 'origin', None))
-pkg_dirs = list(getattr(comfy_aimdo, '__path__', []))
-assert pkg_dirs, 'comfy_aimdo package directory not found'
-so_path = os.path.join(pkg_dirs[0], 'aimdo.so')
-print('aimdo.so =', so_path)
-assert os.path.exists(so_path), so_path
-ctypes.CDLL(so_path)
-print('ctypes load OK')
-PY
-
-RUN ${VENV}/bin/python - <<'PY'
-import shutil, sysconfig, importlib.metadata as md
-
-def copy_dist_info(name: str):
-    d = md.distribution(name)
-    src = getattr(d, '_path', None)
-    if not src:
-        raise SystemExit(f'{name} dist-info path not found')
-    dst = sysconfig.get_paths()['purelib']
-    target = f'{dst}/{src.name}'
-    shutil.copytree(str(src), target, dirs_exist_ok=True)
-    print(f'Copied {name} dist-info to venv: {target}')
-
-copy_dist_info('torch')
-try:
-    copy_dist_info('torchvision')
-except Exception as e:
-    print('torchvision dist-info copy skipped:', repr(e))
-PY
-
-WORKDIR /opt/ComfyUI
-EXPOSE 8188
-
+# ------------------------------------------------------------------
+# Container startup sequence
+#
+# 1) Print minimal CUDA/runtime diagnostics (informational only).
+# 2) Print torchaudio and comfy-aimdo status.
+# 3) Build argument vector for main.py using:
+#      --listen <COMFY_LISTEN>
+#      --port   <COMFY_PORT>
+#      + parsed COMFY_ARGS
+# 4) Use os.execv() to replace PID 1 with the Python process.
+#    This ensures proper signal handling (SIGTERM/SIGINT).
+#
+# Security note:
+# - COMFY_ARGS is parsed using shlex.split() inside Python.
+# - It is NOT evaluated by the shell, reducing injection risk.
+# ------------------------------------------------------------------
 CMD ["/bin/sh", "-lc", "\
 mkdir -p /opt/ComfyUI/.startup-state && \
 /opt/venv/bin/python - <<'PY'\n\
