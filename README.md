@@ -1,155 +1,182 @@
-# ComfyUI-series
+# 📦 ComfyUI Series
 
-<!-- SEO Keywords -->
-<!-- ComfyUI Docker, ComfyUI CUDA 13, ComfyUI Blackwell, DGX Spark ComfyUI, NVFP4 ComfyUI, ComfyUI GPU optimization -->
-
-![GitHub Repo stars](https://img.shields.io/github/stars/masezou/ComfyUI-series?style=for-the-badge)
-![GitHub forks](https://img.shields.io/github/forks/masezou/ComfyUI-series?style=for-the-badge)
-![GitHub last commit](https://img.shields.io/github/last-commit/masezou/ComfyUI-series?style=for-the-badge)
-![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=for-the-badge&logo=docker&logoColor=white)
-![CUDA](https://img.shields.io/badge/CUDA-13%20%7C%2012.x-76B900?style=for-the-badge&logo=nvidia)
-![Blackwell](https://img.shields.io/badge/NVIDIA-Blackwell-green?style=for-the-badge)
+[![Docker](https://img.shields.io/badge/docker-supported-blue)]()
+[![Platform](https://img.shields.io/badge/platform-amd64%20%7C%20arm64-green)]()
+[![GPU](https://img.shields.io/badge/GPU-CUDA%20%7C%20ROCm%20%7C%20OpenVINO-orange)]()
 
 ---
 
-# 🚀 ComfyUI Docker Images Optimized for CUDA, Blackwell, and DGX Spark
+## 📑 Table of Contents
 
-High-performance **ComfyUI Docker images** optimized for:
-
-- NVIDIA Blackwell / RTX 50 series
-- DGX Spark environments
-- CUDA 13 (cu130) with NVFP4 support
-- Stable CUDA 12.x compatibility layers
-
----
-
-## 🔥 Why This Repo Matters
-
-👉 If you want:
-- Faster ComfyUI on **Blackwell GPUs**
-- Working setup on **DGX Spark (Dynamic RAM fixed)**
-- **NVFP4 enabled inference**
-- Docker images with **torchaudio (missing in NGC)**
-
-➡️ This repo gives you a **ready-to-run solution**
+- [Overview](#overview)
+- [Features](#features)
+- [CUDA Variants](#cuda-variants)
+- [Runtime Environments](#runtime-environments)
+- [Dockerfile Variants](#dockerfile-variants)
+- [Build Instructions](#build-instructions)
+- [COMFY_COMMIT](#comfy_commit)
+- [Design Principles](#design-principles)
+- [Use Cases](#use-cases)
+- [Notes](#notes)
+- [Conclusion](#conclusion)
 
 ---
 
-## ⚡ TL;DR (Get Started in 10 seconds)
+## Overview
+
+This repository provides optimized Docker images for ComfyUI, tailored for different GPUs, platforms, and use cases.
+
+---
+
+## Features
+
+- CUDA / ROCm / OpenVINO / CPU unified support
+- NGC and Docker Hub base images
+- Multi-architecture (amd64 / arm64)
+- Cache-optimized builds (apt / pip)
+- Reproducible builds using COMFY_COMMIT
+- Runtime dependency loading for custom nodes
+- Dynamic VRAM / RAM offloading
+
+---
+
+## CUDA Variants
+
+| Version | Description |
+|--------|------------|
+| cu126 | No Blackwell support (intentional testing) |
+| cu128 | First Blackwell support |
+| cu129 | Initial optimization |
+| cu130 | NVFP4 + optimized |
+| cu131/132 | Latest NGC builds |
+
+---
+
+## Runtime Environments
+
+### NVIDIA (CUDA - NGC)
+
+- Highest performance
+- Official NVIDIA optimized stack
+
+#### Limitations
+
+- torchaudio is NOT included
+- Dynamic RAM disabled on DGX Spark
+
+#### This repo fixes:
+
+- Adds torchaudio
+- Integrates comfy-aimdo
+
+👉 Makes NGC production-ready
+
+---
+
+### ROCm (AMD GPU)
+
+- Based on rocm/pytorch
+- AMD GPU support
+
+---
+
+### OpenVINO (Intel)
+
+- CPU + iGPU support
+- OpenVINO nodes
+
+---
+
+### CPU
+
+- Lightweight
+- No GPU required
+
+---
+
+## Dockerfile Variants
+
+```
+Dockerfile Types
+├── dh-*             → DockerHub PyTorch
+├── dh-nvidia-*      → DockerHub + CUDA repo
+├── ngc-*            → NVIDIA NGC PyTorch
+└── ngc-cuda-*       → CUDA base + pip torch
+```
+
+---
+
+## Build Instructions
+
+### AMD64 only
 
 ```bash
-docker run --gpus all -p 8188:8188 <image>
+docker buildx build   --platform linux/amd64   -t <image>   -f Dockerfile.xxx   .
 ```
 
-Open:
-```
-http://localhost:8188
-```
+### Multi-arch
 
----
-
-## 🧠 Core Differentiation
-
-### cu130 = NOT just "latest CUDA"
-
-This repo provides:
-
-- ✅ DGX Spark Dynamic RAM FIX
-- ✅ NVFP4 ENABLED
-- ✅ torchaudio INCLUDED
-- ✅ Blackwell-optimized runtime
-
----
-
-## 📊 Image Selection Guide
-
-| Goal | Use |
-|------|----|
-| Max performance (Blackwell) | cu130 |
-| Stable environment | cu128 |
-| Debug / compare | cu129 / cu126 |
-
----
-
-## 🧪 What Makes This Different From NGC?
-
-| Feature | This Repo | NGC |
-|--------|----------|-----|
-| NVFP4 ready | ✅ | ❌ |
-| DGX Spark RAM fix | ✅ | ❌ |
-| torchaudio | ✅ | ❌ (often missing) |
-| Blackwell tuning | ✅ | Partial |
-
----
-
-## 🎯 Target Users
-
-- ComfyUI users looking for **Docker setup**
-- AI engineers running **DGX Spark**
-- Users with **RTX 50 / Blackwell GPUs**
-- People struggling with:
-  - CUDA mismatch
-  - NGC missing packages
-  - Performance issues
-
----
-
-## 📈 Benchmark Positioning
-
-| Image | Position |
-|------|---------|
-| cu130 | Latest and Fastest |
-| cu129 | Blackwell Suports |
-| cu128 | Stable |
-| cu126 | Legacy |
-
----
-
-## 🏗 Architecture
-
-```
-ComfyUI
-  ↓
-PyTorch
-  ↓
-CUDA 13 / 12.x
-  ↓
-GPU (Blackwell / Ada / Ampere)
+```bash
+docker buildx build   --platform linux/amd64,linux/arm64   -t <image>   --push   -f Dockerfile.xxx   .
 ```
 
 ---
 
-## ⭐ Star This Repo If:
+## COMFY_COMMIT
 
-- It saved your setup time
-- You use ComfyUI + Docker
-- You run Blackwell / DGX Spark
-- You care about GPU optimization
+```bash
+COMFY_COMMIT=$(git ls-remote https://github.com/comfyanonymous/ComfyUI.git refs/heads/master | awk '{print $1}')
+```
 
----
-
-## 🔗 Keywords
-
-ComfyUI Docker
-ComfyUI CUDA 13
-ComfyUI Blackwell
-ComfyUI DGX Spark
-NVFP4 ComfyUI
-ComfyUI performance optimization
-ComfyUI GPU setup
+- Rebuild only when upstream changes
+- Maximizes cache reuse
 
 ---
 
-## 🧩 Future Plans
+## Design Principles
 
-- Benchmarks (cu130 vs cu128)
-- Flux / Z-Image-Turbo presets
-- Multi-GPU tuning
-- Kubernetes deployment
+### Dynamic RAM / VRAM
+
+- Enables low VRAM operation
+- Required for DGX Spark
+
+Solution:
+
+- comfy-aimdo integration
 
 ---
 
-## 📜 License
+## Use Cases
 
-Check upstream licenses for ComfyUI, models, and dependencies.
+- GPU validation (Ampere / Ada / Blackwell)
+- DGX Spark environments
+- NAS (QNAP)
+- ARM systems
+- Home AI labs
 
+---
+
+## Notes
+
+- arm64 CUDA limitations exist
+- ROCm depends on kernel/driver
+- OpenVINO depends on node support
+- cu126 intentionally does NOT support Blackwell
+
+---
+
+## Conclusion
+
+👉 Recommended default: **ngc-cu130**
+
+This repository transforms raw GPU stacks into practical, production-ready environments.
+
+---
+
+## Key Insight
+
+NGC images lack:
+- torchaudio
+- Dynamic RAM (DGX Spark)
+
+This repo solves both.
