@@ -321,6 +321,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     python3 -m venv --system-site-packages ${VENV} \
  && ${VENV}/bin/python -m ensurepip --upgrade \
  && ${VENV}/bin/python -m pip install -U pip setuptools wheel setuptools-scm \
+ && ${VENV}/bin/python -m pip install --force-reinstall "numpy<2" \
  && ${VENV}/bin/python -m pip install -U GitPython uv
 
 # ------------------------------------------------------------------
@@ -366,10 +367,19 @@ RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
     fi \
  && git rev-parse HEAD
 
+RUN mkdir -p /opt/ComfyUI/user/__manager \
+ && cat <<'EOF' > /opt/ComfyUI/user/__manager/pip_blacklist.list
+numpy
+torch
+torchvision
+torchaudio
+EOF
+
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     cd /opt/ComfyUI \
  && awk '!/^(torch|torchvision|torchaudio|comfy-aimdo)([<>= ].*)?$/ {print}' requirements.txt > /tmp/requirements.no_torch.txt \
- && ${VENV}/bin/python -m pip install -U -r /tmp/requirements.no_torch.txt
+ && ${VENV}/bin/python -m pip install -U -r /tmp/requirements.no_torch.txt \
+ && ${VENV}/bin/python -m pip install --force-reinstall "numpy<2"
 
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     ${VENV}/bin/python -m pip install -U --no-binary :all: sageattention
@@ -524,7 +534,7 @@ find /opt/ComfyUI/custom_nodes -type f -name requirements.txt 2>/dev/null | whil
     old_hash=\"$(cat \"$hash_file\" 2>/dev/null)\"\n\
   fi\n\
   echo \"[startup] found: $req\"\n\
-  awk 'NF > 0 && $0 !~ /^[[:space:]]*#/ && $0 !~ /^(torch|torchvision|torchaudio)([<>=!~ ].*)?$/' \"$req\" > \"$filtered\"\n\
+  awk 'NF > 0 && $0 !~ /^[[:space:]]*#/ && $0 !~ /^(torch|torchvision|torchaudio|numpy)([<>=!~ ].*)?$/' \"$req\" > \"$filtered\"\n\
   if [ ! -s \"$filtered\" ]; then\n\
     echo \"[startup] no installable deps after filtering for $node_name\"\n\
     echo \"$current_hash\" > \"$hash_file\"\n\
