@@ -105,8 +105,13 @@ RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
  && echo "COMFY_COMMIT=${COMFY_COMMIT}" \
  && git clone --filter=blob:none https://github.com/comfyanonymous/ComfyUI.git /opt/ComfyUI \
  && cd /opt/ComfyUI \
- && git fetch --depth 1 origin "${COMFY_COMMIT}" \
- && git checkout --detach "${COMFY_COMMIT}"
+ && if [ -n "${COMFY_COMMIT}" ]; then \
+      git fetch --depth 1 origin "${COMFY_COMMIT}" \
+   && git checkout --detach "${COMFY_COMMIT}"; \
+    else \
+      git checkout "${COMFY_REF}"; \
+    fi \
+ && git rev-parse HEAD
 
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     cd /opt/ComfyUI \

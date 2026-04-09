@@ -10,6 +10,23 @@
 # - Add COMFY_COMMIT for stable upstream-tracking builds
 # ------------------------------------------------------------------
 
+# ================================================================
+# Stage: final/runtime-only image
+# Purpose:
+# - Start from the official ROCm PyTorch runtime image
+# - Keep the vendor-provided ROCm-enabled torch installation
+# - Create a venv that reuses system-site-packages from the base image
+# - Clone ComfyUI and install all non-torch Python requirements
+# - Configure ROCm/HIP runtime environment and launch ComfyUI
+# Notes:
+# - This Dockerfile has a single stage, but it still has clear phases:
+#   1) base package preparation
+#   2) PyTorch verification
+#   3) venv creation
+#   4) ComfyUI checkout
+#   5) dependency install
+#   6) runtime launch
+# ================================================================
 FROM rocm/pytorch:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -17,10 +34,12 @@ ARG COMFY_REF=master
 ARG COMFY_COMMIT=
 ARG COMFY_CACHEBUST=0
 
+# Shared Python/venv defaults
 ENV VENV=/opt/venv \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# Install OS-level dependencies needed by ComfyUI and common custom nodes
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
@@ -32,6 +51,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && git lfs install --system \
     && rm -rf /var/lib/apt/lists/*
 
+# Verify that the base image really exposes a ROCm/HIP-enabled torch build
 RUN python3 - <<'PY'
 import torch
 print('torch =', torch.__version__)
@@ -39,6 +59,8 @@ print('torch.version.hip =', getattr(torch.version, 'hip', None))
 assert getattr(torch.version, 'hip', None) is not None
 PY
 
+# Create a venv that inherits the ROCm torch stack from system site-packages
+# and add a few helper Python packages used during build/runtime
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     python3 -m venv --system-site-packages ${VENV} \
  && ${VENV}/bin/python -m ensurepip --upgrade \
@@ -46,6 +68,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
  && ${VENV}/bin/python -m pip install -U GitPython uv \
  && rm -rf /tmp/*
 
+# Clone ComfyUI source and optionally pin to a specific commit
 RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
  && echo "COMFY_REF=${COMFY_REF}" \
  && echo "COMFY_COMMIT=${COMFY_COMMIT}" \
@@ -58,6 +81,8 @@ RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
     fi \
  && rm -rf /opt/ComfyUI/.git
 
+# Install ComfyUI dependencies, but intentionally skip torch/torchvision/torchaudio
+# so the preinstalled ROCm-capable versions from the base image remain in use
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     awk '!/^(torch|torchvision|torchaudio)([<>= ].*)?$/ {print}' /opt/ComfyUI/requirements.txt > /tmp/requirements.no_torch.txt \
  && ${VENV}/bin/python -m pip install -U -r /tmp/requirements.no_torch.txt \
@@ -67,6 +92,10 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 WORKDIR /opt/ComfyUI
 EXPOSE 8188
 
+# Runtime environment:
+# - expose the venv first in PATH
+# - define ComfyUI listen/port/extra args
+# - tune ROCm/HIP visibility and allocator-related settings
 ENV PATH="/opt/venv/bin:${PATH}" \
     VIRTUAL_ENV=/opt/venv \
     PYTHONUNBUFFERED=1 \
@@ -87,6 +116,12 @@ ENV PATH="/opt/venv/bin:${PATH}" \
     ROCR_VISIBLE_DEVICES=0 \
     HSA_OVERRIDE_GFX_VERSION=11.5.1
 
+# Container startup sequence:
+# - create state directory for custom-node dependency hashes
+# - print torch/device diagnostics
+# - scan custom_nodes for requirements.txt
+# - install only filtered, changed dependencies
+# - exec ComfyUI with env-driven listen/port/extra args
 CMD ["/bin/sh", "-lc", "\
 mkdir -p /opt/ComfyUI/.startup-state && \
 /opt/venv/bin/python - <<'PY'\n\

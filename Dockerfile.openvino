@@ -9,6 +9,17 @@
 # - safer cleanup when cache mounts are in use
 # ------------------------------------------------------------------
 
+# ================================================================
+# Stage: base
+# Purpose:
+# - Start from Ubuntu 24.04
+# - Validate target architecture (amd64 only)
+# - Install common OS packages, Python, Git LFS, FFmpeg, OpenCL/Level Zero
+# - Install Intel GPU runtime packages for OpenCL / Level Zero
+# - Register Intel OpenCL ICD and refresh linker cache
+# Notes:
+# - This stage is shared by both builder and runtime to avoid duplication
+# ================================================================
 FROM ubuntu:24.04 AS base
 
 ARG TARGETPLATFORM
@@ -19,10 +30,12 @@ ARG IGC_VER=2.30.1+20950
 ARG COMPUTE_VER=26.09.37435.1
 ARG GMMLIB_VER=22.9.0
 
+# Python and virtualenv defaults used in later stages
 ENV PIP_NO_CACHE_DIR=1
 ENV PYTHONUNBUFFERED=1
 ENV VENV=/opt/venv
 
+# Install base OS dependencies and fail early on non-amd64 builds
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     echo "[build] (base) TARGETPLATFORM=${TARGETPLATFORM} TARGETARCH=${TARGETARCH}" \
@@ -57,6 +70,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
  && git lfs install --system \
  && rm -rf /var/lib/apt/lists/*
 
+# Install Intel GPU userspace runtime components from upstream release artifacts
 RUN set -eux; \
     mkdir -p /tmp/intel; \
     cd /tmp/intel; \
@@ -76,23 +90,37 @@ RUN set -eux; \
     || apt-get update && apt-get -fy install; \
     rm -rf /tmp/intel /var/lib/apt/lists/*
 
+# Register Intel OpenCL ICD loader entry and shared library path
 RUN mkdir -p /etc/OpenCL/vendors \
  && printf '%s\n' '/usr/lib/x86_64-linux-gnu/intel-opencl/libigdrcl.so' > /etc/OpenCL/vendors/intel.icd \
  && printf '%s\n' '/usr/lib/x86_64-linux-gnu/intel-opencl' > /etc/ld.so.conf.d/intel-opencl.conf \
  && ldconfig
 
+# ================================================================
+# Stage: builder
+# Purpose:
+# - Create an isolated Python virtualenv
+# - Clone ComfyUI at a branch/tag or pinned commit
+# - Install ComfyUI Python dependencies
+# - Replace any accelerator-specific PyTorch with CPU-only wheels
+#   for core ComfyUI stability in this image
+# - Install OpenVINO packages and the comfyui_openvino custom node
+# - Clean bytecode/caches before handing artifacts to runtime
+# ================================================================
 FROM base AS builder
 
 ARG COMFY_REF=master
 ARG COMFY_COMMIT=
 ARG COMFY_CACHEBUST=0
 
+# Create the application virtual environment and install build helpers
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     python3 -m venv ${VENV} \
  && ${VENV}/bin/python -m pip install -U pip setuptools wheel \
  && ${VENV}/bin/python -m pip install -U GitPython uv \
  && rm -rf /tmp/pip-* /tmp/tmp*
 
+# Clone ComfyUI source and optionally pin to a specific commit
 RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
  && echo "COMFY_REF=${COMFY_REF}" \
  && echo "COMFY_COMMIT=${COMFY_COMMIT}" \
@@ -105,6 +133,7 @@ RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
       git checkout "${COMFY_REF}"; \
     fi
 
+# Install ComfyUI requirements into the virtual environment
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     cd /opt/ComfyUI \
  && ${VENV}/bin/python -m pip install -U -r requirements.txt \
@@ -123,6 +152,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
  && ${VENV}/bin/python -c "import torch; print('torch=', torch.__version__); print('cuda=', getattr(torch.version, 'cuda', None)); print('cuda.is_available=', torch.cuda.is_available())" \
  && rm -rf /tmp/pip-* /tmp/tmp*
 
+# Install OpenVINO runtime/tooling used by the OpenVINO custom node path
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     ${VENV}/bin/python -m pip install -U \
       openvino \
@@ -131,6 +161,8 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
  && rm -rf /tmp/pip-* /tmp/tmp*
 
 WORKDIR /opt/ComfyUI/custom_nodes
+
+# Add the OpenVINO custom node and install only its non-PyTorch requirements
 RUN git clone https://github.com/openvino-dev-samples/comfyui_openvino.git \
  && cd comfyui_openvino \
  && if [ -f requirements.txt ]; then \
@@ -140,11 +172,22 @@ RUN git clone https://github.com/openvino-dev-samples/comfyui_openvino.git \
     fi \
  && rm -rf /root/.cache /tmp/pip-* /tmp/tmp*
 
+# Remove Python bytecode/caches to keep the copied runtime tree cleaner
 RUN find ${VENV} -type d -name "__pycache__" -prune -exec rm -rf {} + \
  && find ${VENV} -type f -name "*.pyc" -delete
 
+# ================================================================
+# Stage: runtime
+# Purpose:
+# - Assemble the final runnable image from base + built artifacts
+# - Define OpenVINO / CPU execution defaults
+# - Generate helper scripts for diagnostics and startup
+# - On container start, print Intel/OpenCL diagnostics, lazily install
+#   custom node requirements, then exec ComfyUI
+# ================================================================
 FROM base AS runtime
 
+# Runtime environment for ComfyUI, OpenVINO, and startup behavior
 ENV PATH="/opt/venv/bin:${PATH}" \
     VIRTUAL_ENV=/opt/venv \
     PYTHONUNBUFFERED=1 \
@@ -163,12 +206,14 @@ ENV PATH="/opt/venv/bin:${PATH}" \
     TORCHDYNAMO_DISABLE=1 \
     TORCHINDUCTOR_DISABLE=1
 
+# Copy the prepared Python environment and ComfyUI tree from builder
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /opt/ComfyUI /opt/ComfyUI
 
 WORKDIR /opt/ComfyUI
 EXPOSE 8188
 
+# Create a small Python diagnostic utility to print torch/OpenVINO status
 RUN python3 - <<'PY'
 from pathlib import Path
 Path('/usr/local/bin/check_openvino.py').write_text(
@@ -186,6 +231,7 @@ except Exception as e:
 )
 PY
 
+# Create the Python launcher that normalizes env vars into ComfyUI argv
 RUN python3 - <<'PY'
 from pathlib import Path
 Path('/usr/local/bin/launch_comfyui.py').write_text(
@@ -204,6 +250,11 @@ os.execv(argv[0], argv)
 )
 PY
 
+# Create the shell entrypoint wrapper:
+# - emit Intel/OpenCL diagnostics
+# - detect custom node requirements.txt files
+# - install only when the hash changed
+# - finally launch ComfyUI
 RUN python3 - <<'PY'
 from pathlib import Path
 Path('/usr/local/bin/run_comfyui.sh').write_text(
@@ -275,6 +326,8 @@ exec /opt/venv/bin/python /usr/local/bin/launch_comfyui.py
 )
 PY
 
+# Make the generated entrypoint wrapper executable
 RUN chmod +x /usr/local/bin/run_comfyui.sh
 
+# Default container start command
 CMD ["/usr/local/bin/run_comfyui.sh"]
