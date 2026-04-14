@@ -109,8 +109,10 @@ Dockerfile構成
 ### AMD64のみ
 
 ```bash
+COMFY_REF="v0.19.0"
 docker buildx build \
   --platform linux/amd64 \
+  --build-arg COMFY_REF="${COMFY_REF}" \
   -t <image> \
   -f Dockerfile.xxx \
   .
@@ -118,14 +120,28 @@ docker buildx build \
 
 ### マルチアーキテクチャ
 
+Pushができるレジストリサーバが必要
+
 ```bash
+COMFY_REF="v0.19.0"
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
+  --build-arg COMFY_REF="${COMFY_REF}" \
   -t <image> \
   --push \
   -f Dockerfile.xxx \
   .
 ```
+
+---
+
+## COMFY_REF
+
+```bash
+COMFY_REF="v0.19.0"
+```
+
+- バージョン指定
 
 ---
 
@@ -156,7 +172,7 @@ DGX Sparkでは：
 
 - GPU世代検証
 - DGX Spark
-- NAS（QNAP等）
+- NAS（QNAP QuTS hero6 cu129）
 - ARM環境
 - 自宅AI環境
 
@@ -167,13 +183,14 @@ DGX Sparkでは：
 - arm64はCUDA制限あり
 - ROCmはドライバ依存
 - OpenVINOはノード依存
-- cu126は意図的に非対応
+- cu126は意図的に非対応(Blackwellでは動かないことを証明するために作成)
 
 ---
 
 ## まとめ
 
 👉 推奨：**ngc-cu130**
+👉 ComfyUI 0.19.0で動作確認済み
 
 ---
 
@@ -185,5 +202,3 @@ NGCの弱点：
 - Dynamic RAMなし
 
 👉 本リポジトリで補完済み
-
-

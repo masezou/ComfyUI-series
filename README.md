@@ -111,18 +111,32 @@ Dockerfile Types
 ### AMD64 only
 
 ```bash
-docker buildx build   --platform linux/amd64   -t <image>   -f Dockerfile.xxx   .
+COMFY_REF="v0.19.0"
+docker buildx build   --platform linux/amd64 --build-arg COMFY_REF="${COMFY_REF}"  -t <image>   -f Dockerfile.xxx   .
 ```
 
 ### Multi-arch
 
 ```bash
-docker buildx build   --platform linux/amd64,linux/arm64   -t <image>   --push   -f Dockerfile.xxx   .
+COMFY_REF="v0.19.0"
+docker buildx build   --platform linux/amd64,linux/arm64 --build-arg COMFY_REF="${COMFY_REF}"  -t <image>   --push   -f Dockerfile.xxx   .
 ```
 
 ---
 
+## COMFY_REF
+
+```bash
+COMFY_REF="v0.19.0"
+```
+
+- Enable to set ComfyUI version
+
+---
+
 ## COMFY_COMMIT
+
+If you set COMFY_REF, you don't use set COMFY_COMMIT
 
 ```bash
 COMFY_COMMIT=$(git ls-remote https://github.com/comfyanonymous/ComfyUI.git refs/heads/master | awk '{print $1}')
@@ -150,7 +164,7 @@ Solution:
 
 - GPU validation (Ampere / Ada / Blackwell)
 - DGX Spark environments
-- NAS (QNAP)
+- NAS (QNAP QuTS hero 6)
 - ARM systems
 - Home AI labs
 
@@ -168,6 +182,7 @@ Solution:
 ## Conclusion
 
 👉 Recommended default: **ngc-cu130**
+👉 Verified ComfyUI 0.19.0
 
 This repository transforms raw GPU stacks into practical, production-ready environments.
 
