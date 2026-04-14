@@ -77,7 +77,7 @@
 
 ### ROCm（AMD）
 
-- AMD GPU対応
+- AMD GPU対応 (Strix Halo)
 
 ---
 
@@ -89,7 +89,7 @@
 
 ### CPU
 
-- 軽量・検証用
+- GPUを使わない軽量・検証用
 
 ---
 
@@ -191,13 +191,14 @@ DGX Sparkでは：
 ## まとめ
 
 👉 推奨：**ngc-cu130**
+
 👉 ComfyUI 0.19.0で動作確認済み
 
 ---
 
 ## キーポイント
 
-NGCの弱点：
+NGC pytorchイメージの弱点：
 
 - torchaudioなし
 - Dynamic RAMなし

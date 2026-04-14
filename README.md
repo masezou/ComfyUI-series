@@ -183,6 +183,7 @@ Solution:
 ## Conclusion
 
 👉 Recommended default: **ngc-cu130**
+
 👉 Verified ComfyUI 0.19.0
 
 This repository transforms raw GPU stacks into practical, production-ready environments.
