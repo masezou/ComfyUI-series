@@ -14,6 +14,7 @@
 - [Runtime Environments](#runtime-environments)
 - [Dockerfile Variants](#dockerfile-variants)
 - [Build Instructions](#build-instructions)
+- [COMFY_REF](#comfy_ref)
 - [COMFY_COMMIT](#comfy_commit)
 - [Design Principles](#design-principles)
 - [Use Cases](#use-cases)
@@ -164,7 +165,7 @@ Solution:
 
 - GPU validation (Ampere / Ada / Blackwell)
 - DGX Spark environments
-- NAS (QNAP QuTS hero 6)
+- NAS (QNAP QuTS hero 6 CU129)
 - ARM systems
 - Home AI labs
 

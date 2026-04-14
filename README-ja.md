@@ -14,6 +14,7 @@
 - [実行環境](#実行環境)
 - [Dockerfileの種類](#dockerfileの種類)
 - [ビルド方法](#ビルド方法)
+- [COMFY_REF](#comfy_ref)
 - [COMFY_COMMIT](#comfy_commit)
 - [設計方針](#設計方針)
 - [ユースケース](#ユースケース)
