@@ -164,7 +164,12 @@ services:
     # retries: mark unhealthy after 10 failures
     # ----------------------------------------------------------------
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8188/ >/dev/null || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8188/system_stats')\""
+        ]
       interval: 30s
       timeout: 5s
-      retries: 10
+      retries: 5
+      start_period: 60s
