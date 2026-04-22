@@ -24,7 +24,7 @@
 #   behavior may still make the NGC-based image a better choice on GDX Spark.
 # ------------------------------------------------------------------
 
-ARG CUDA_VER=13.0.2
+ARG CUDA_VER=13.0.3
 ARG UBUNTU_VER=24.04
 ARG PYTORCH_CUDA=cu130
 ARG COMFY_REF=master
