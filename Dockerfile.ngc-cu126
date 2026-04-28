@@ -41,7 +41,7 @@
 ARG NGC_TAG=24.12-py3
 ARG COMFY_REF=master
 ARG TORCHAUDIO_REF=v2.6.0
-ARG COMFY_AIMDO_REF=v0.2.12
+ARG COMFY_AIMDO_REF=v0.2.14
 ARG COMFY_COMMIT=
 
 # ==================================================================

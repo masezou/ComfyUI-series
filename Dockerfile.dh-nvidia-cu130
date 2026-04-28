@@ -29,7 +29,7 @@ ARG UBUNTU_VER=24.04
 ARG PYTORCH_CUDA=cu130
 ARG COMFY_REF=master
 ARG COMFY_COMMIT=
-ARG COMFY_AIMDO_REF=v0.2.12
+ARG COMFY_AIMDO_REF=v0.2.14
 
 # ------------------------------------------------------------------
 # Builder stage

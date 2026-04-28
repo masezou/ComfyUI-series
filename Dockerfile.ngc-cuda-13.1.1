@@ -1,29 +1,26 @@
 # syntax=docker/dockerfile:1.7
 # ------------------------------------------------------------------
-# ComfyUI on NVIDIA CUDA base image (NGC)
+# ComfyUI on NVIDIA NGC CUDA base images
 #
 # Goals:
-# - Use NVIDIA NGC CUDA image
+# - Use NVIDIA NGC CUDA builder/runtime images
 # - Install explicit PyTorch CUDA wheels (torch/torchvision/torchaudio)
-# - Avoid optional CUDA extensions (xformers/flash-attn/triton builds)
-# - Install ComfyUI and its dependencies
+# - Avoid optional CUDA extensions from unrelated dependency paths
+# - Install ComfyUI and its dependencies into a venv
 # - Build comfy-aimdo from source so aimdo.so is present in the image
 # - Keep git available in the runtime image for ComfyUI-Manager / GitPython
 #
 # Notes:
-# - This variant uses explicit NGC CUDA base images instead of Docker Hub nvidia/cuda.
-# - Builder image : nvcr.io/nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04
-# - Runtime image : nvcr.io/nvidia/cuda:12.6.3-runtime-ubuntu24.04
-# - Default PyTorch wheel channel: cu126
-# - For CUDA 12.9.x / 13.x, PyTorch wheel channels may not map 1:1 to the container CUDA
-#   version. This file defaults to the selected PyTorch wheel channel intentionally.
+# - Builder image : nvcr.io/nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04
+# - Runtime image : nvcr.io/nvidia/cuda:13.0.2-runtime-ubuntu24.04
+# - Default PyTorch wheel channel: cu130
 # - COMFY_COMMIT can be passed to pin an exact upstream ComfyUI revision.
 # - COMFY_CACHEBUST is kept as an emergency/manual layer invalidation knob.
 # ------------------------------------------------------------------
 
-ARG BUILDER_IMAGE=nvcr.io/nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04
-ARG RUNTIME_IMAGE=nvcr.io/nvidia/cuda:12.6.3-runtime-ubuntu24.04
-ARG PYTORCH_CUDA=cu126
+ARG BUILDER_IMAGE=nvcr.io/nvidia/cuda:13.1.1-cudnn-devel-ubuntu24.04
+ARG RUNTIME_IMAGE=nvcr.io/nvidia/cuda:13.1.1-runtime-ubuntu24.04
+ARG PYTORCH_CUDA=cu130
 ARG COMFY_REF=master
 ARG COMFY_AIMDO_REF=v0.2.14
 ARG COMFY_COMMIT=
