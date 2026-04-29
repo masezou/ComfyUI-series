@@ -11,7 +11,7 @@ ARG UBUNTU_VER=24.04
 ARG PYTORCH_CUDA=cu129
 ARG COMFY_REF=master
 ARG COMFY_COMMIT=
-ARG COMFY_AIMDO_REF=v0.2.14
+ARG COMFY_AIMDO_REF=master
 
 # ==================================================================
 # Stage 1: Build Python environment + ComfyUI
