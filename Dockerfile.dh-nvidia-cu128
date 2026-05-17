@@ -20,7 +20,7 @@ ARG UBUNTU_VER=24.04
 ARG PYTORCH_CUDA=cu128
 ARG COMFY_REF=master
 ARG COMFY_COMMIT=
-ARG COMFY_AIMDO_REF=v0.2.14
+ARG COMFY_AIMDO_REF=v0.3.0
 
 # ------------------------------------------------------------------
 # Base Image
@@ -131,6 +131,9 @@ RUN ${VENV}/bin/python -m pip install -U -r /opt/ComfyUI/requirements.txt \
 # runtime (final image)
 # =========================
 FROM nvidia/cuda:${CUDA_VER}-cudnn-runtime-ubuntu${UBUNTU_VER}
+
+COPY --from=build_aimdo /usr/local/lib/libfunchook.so* /usr/local/lib/
+RUN ldconfig
 
 ARG DEBIAN_FRONTEND=noninteractive
 
