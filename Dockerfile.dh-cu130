@@ -13,7 +13,7 @@
 # - Track ComfyUI upstream with COMFY_COMMIT while keeping COMFY_CACHEBUST
 # ------------------------------------------------------------------
 
-FROM pytorch/pytorch:2.11.0-cuda13.0-cudnn9-runtime
+FROM pytorch/pytorch:2.12.0-cuda13.0-cudnn9-runtime
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG COMFY_REF=master
