@@ -131,9 +131,6 @@ RUN ${VENV}/bin/python -m pip install -U -r /opt/ComfyUI/requirements.txt \
 # =========================
 FROM nvidia/cuda:${CUDA_VER}-cudnn-runtime-ubuntu${UBUNTU_VER}
 
-COPY --from=build_aimdo /usr/local/lib/libfunchook.so* /usr/local/lib/
-RUN ldconfig
-
 ARG DEBIAN_FRONTEND=noninteractive
 
 # Runtime deps only (ffmpeg required)
