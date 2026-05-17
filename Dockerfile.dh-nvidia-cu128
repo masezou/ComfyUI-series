@@ -126,6 +126,86 @@ RUN ${VENV}/bin/python -m pip install -U -r /opt/ComfyUI/requirements.txt \
  && ${VENV}/bin/python -m pip install -U sageattention \
  && rm -rf /tmp/*
 
+# ==================================================================
+# Stage: build comfy-aimdo from source
+# ==================================================================
+# ------------------------------------------------------------------
+# Why this stage exists:
+# - Some environments end up with comfy-aimdo installed but without aimdo.so.
+# - Building from source ensures the shared object exists in the wheel.
+# - We support both x86_64 and arm64/aarch64 by switching CUDA target paths.
+# ------------------------------------------------------------------
+FROM nvidia/cuda:${CUDA_VER}-cudnn-devel-ubuntu${UBUNTU_VER} AS build_aimdo
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG COMFY_AIMDO_REF
+
+ENV VENV=/opt/venv \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TORCH_CUDA_ARCH_LIST=12.1
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      git \
+      python3 python3-venv \
+      python3-dev build-essential \
+      cmake ninja-build pkg-config \
+      file \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    python3 -m venv ${VENV} \
+ && ${VENV}/bin/python -m ensurepip --upgrade \
+ && ${VENV}/bin/python -m pip install -U pip setuptools wheel setuptools-scm \
+ && rm -rf /tmp/*
+
+# ------------------------------------------------------------------
+# Build funchook dependency for comfy-aimdo Linux function hooks
+# ------------------------------------------------------------------
+RUN git clone --depth 1 https://github.com/kubo/funchook.git /tmp/funchook \
+ && cmake -S /tmp/funchook -B /tmp/funchook/build -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+      -DFUNCHOOK_BUILD_TESTS=OFF \
+ && cmake --build /tmp/funchook/build \
+ && cmake --install /tmp/funchook/build \
+ && ldconfig
+
+RUN git clone https://github.com/Comfy-Org/comfy-aimdo.git /tmp/comfy-aimdo \
+ && cd /tmp/comfy-aimdo \
+ && git checkout "${COMFY_AIMDO_REF}" \
+ && ARCH="$(uname -m)" \
+ && case "${ARCH}" in \
+      x86_64) CUDA_TARGET="x86_64-linux" ;; \
+      aarch64|arm64) CUDA_TARGET="sbsa-linux" ;; \
+      *) echo "Unsupported arch: ${ARCH}" >&2; exit 1 ;; \
+    esac \
+ && echo "ARCH=${ARCH} CUDA_TARGET=${CUDA_TARGET}" \
+ && test -d "/usr/local/cuda/targets/${CUDA_TARGET}/include" \
+ && test -d "/usr/local/cuda/targets/${CUDA_TARGET}/lib/stubs" \
+ && test -f "/usr/local/cuda/targets/${CUDA_TARGET}/lib/stubs/libcuda.so" \
+ && gcc -shared -o comfy_aimdo/aimdo.so -fPIC \
+      -I"./src" \
+      -I"/usr/local/include" \
+      -I"/usr/local/cuda/targets/${CUDA_TARGET}/include" \
+      -L"/usr/local/lib" \
+      -L"/usr/local/cuda/targets/${CUDA_TARGET}/lib/stubs" \
+      -Wl,-rpath,/usr/local/lib \
+      -Wno-error \
+      src/*.c src-cuda/*.c src-posix/*.c -lfunchook -lcuda \
+ && test -f comfy_aimdo/aimdo.so \
+ && file comfy_aimdo/aimdo.so \
+ && mkdir -p /tmp/wheels \
+ && ${VENV}/bin/python -m pip wheel . \
+      --no-deps --no-build-isolation \
+      -w /tmp/wheels \
+ && echo "=== build_aimdo wheel output ===" \
+ && ls -l /tmp/wheels \
+ && find /tmp/wheels -maxdepth 1 -type f -name 'comfy_aimdo-*.whl' -print \
+ && test -n "$(find /tmp/wheels -maxdepth 1 -type f -name 'comfy_aimdo-*.whl' | head -n1)"
 
 # =========================
 # runtime (final image)
