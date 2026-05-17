@@ -1,74 +1,72 @@
 # syntax=docker/dockerfile:1.7
+
 # ------------------------------------------------------------------
-# ComfyUI on ROCm PyTorch runtime (ROCm 7.2 / HIP-OPTIMAL)
+# ComfyUI for Strix Halo / gfx1151 using TheRock ROCm 7.13 wheels
 #
-# Revised goals:
-# - Keep official ROCm PyTorch runtime image
-# - Reuse preinstalled ROCm-enabled torch from base image
-# - Improve cache efficiency for apt/pip and ComfyUI updates
-# - Keep COMFY_CACHEBUST for emergency invalidation
-# - Add COMFY_COMMIT for stable upstream-tracking builds
+# Target:
+# - Ryzen AI MAX+ 395 / Radeon 8060S / gfx1151
+# - ROCm 7.13 test image
+# - ComfyUI runtime with env-driven startup args
+# - Startup custom_nodes requirements installer inherited from 7.2.3 image
+#
+# Notes:
+# - This is a test image, not a production-stable ROCm 7.2.3 replacement.
+# - SageAttention is intentionally not installed by default for ROCm.
+# - NVIDIA/CUDA/TensorRT-related custom node dependencies are filtered out.
 # ------------------------------------------------------------------
 
-# ================================================================
-# Stage: final/runtime-only image
-# Purpose:
-# - Start from the official ROCm PyTorch runtime image
-# - Keep the vendor-provided ROCm-enabled torch installation
-# - Create a venv that reuses system-site-packages from the base image
-# - Clone ComfyUI and install all non-torch Python requirements
-# - Configure ROCm/HIP runtime environment and launch ComfyUI
-# Notes:
-# - This Dockerfile has a single stage, but it still has clear phases:
-#   1) base package preparation
-#   2) PyTorch verification
-#   3) venv creation
-#   4) ComfyUI checkout
-#   5) dependency install
-#   6) runtime launch
-# ================================================================
-FROM rocm/pytorch:rocm7.2.3_ubuntu24.04_py3.12_pytorch_release_2.10.0
+FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG COMFY_REF=master
 ARG COMFY_COMMIT=
 ARG COMFY_CACHEBUST=0
 
-# Shared Python/venv defaults
+# TheRock gfx1151 wheel index.
+# Override this if AMD changes the endpoint.
+ARG THEROCK_INDEX_URL="https://d2awnip2yjpvqn.cloudfront.net/v2/gfx1151/"
+
 ENV VENV=/opt/venv \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Install OS-level dependencies needed by ComfyUI and common custom nodes
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-      git ca-certificates curl \
-      python3-venv python3-full python3-dev \
+      ca-certificates curl git git-lfs \
+      python3 python3-venv python3-full python3-pip python3-dev \
       ffmpeg \
-      libgl1 libglib2.0-0 \
-      git-lfs \
+      libgl1 libglib2.0-0 libgomp1 libnuma1 \
+      pciutils kmod procps \
+      build-essential pkg-config \
     && git lfs install --system \
     && rm -rf /var/lib/apt/lists/*
 
-# Verify that the base image really exposes a ROCm/HIP-enabled torch build
-RUN python3 - <<'PY'
-import torch
-print('torch =', torch.__version__)
-print('torch.version.hip =', getattr(torch.version, 'hip', None))
-assert getattr(torch.version, 'hip', None) is not None
-PY
-
-# Create a venv that inherits the ROCm torch stack from system site-packages
-# and add a few helper Python packages used during build/runtime
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    python3 -m venv --system-site-packages ${VENV} \
+    python3 -m venv ${VENV} \
  && ${VENV}/bin/python -m ensurepip --upgrade \
  && ${VENV}/bin/python -m pip install -U pip setuptools wheel \
- && ${VENV}/bin/python -m pip install -U GitPython uv \
- && rm -rf /tmp/*
+ && ${VENV}/bin/python -m pip install -U GitPython uv
 
-# Clone ComfyUI source and optionally pin to a specific commit
+# Install ROCm runtime/libraries and PyTorch stack for gfx1151 from TheRock.
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    ${VENV}/bin/python -m pip install \
+      --index-url "${THEROCK_INDEX_URL}" \
+      "rocm[libraries,devel]" \
+ && ${VENV}/bin/python -m pip install \
+      --index-url "${THEROCK_INDEX_URL}" \
+      torch torchvision torchaudio pytorch-triton-rocm numpy
+
+# Verify ROCm PyTorch stack.
+RUN ${VENV}/bin/python - <<'PY'
+import torch
+print("torch =", torch.__version__)
+print("torch.version.hip =", getattr(torch.version, "hip", None))
+print("cuda.is_available =", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("device =", torch.cuda.get_device_name(0))
+PY
+
 RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
  && echo "COMFY_REF=${COMFY_REF}" \
  && echo "COMFY_COMMIT=${COMFY_COMMIT}" \
@@ -81,21 +79,19 @@ RUN echo "COMFY_CACHEBUST=${COMFY_CACHEBUST}" \
     fi \
  && rm -rf /opt/ComfyUI/.git
 
-# Install ComfyUI dependencies, but intentionally skip torch/torchvision/torchaudio
-# so the preinstalled ROCm-capable versions from the base image remain in use
+# Install ComfyUI dependencies except torch/torchvision/torchaudio and GPU-vendor-conflicting packages.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     bash -lc ' \
       awk '"'"'NF > 0 && \
       $0 !~ /^[[:space:]]*#/ && \
       $0 !~ /^(torch|torchvision|torchaudio)([<>=!~ ].*)?$/ && \
-      tolower($0) !~ /(nvidia|cuda|cudnn|tensorrt|triton|vfx|amido)/ \
+      tolower($0) !~ /(nvidia|cuda|cudnn|tensorrt|vfx|amido)/ \
       {print}'"'"' /opt/ComfyUI/requirements.txt > /tmp/requirements.no_torch.txt \
       && if [ -s /tmp/requirements.no_torch.txt ]; then \
            ${VENV}/bin/python -m pip install -U -r /tmp/requirements.no_torch.txt; \
          else \
            echo "[build] no installable deps after filtering"; \
          fi \
-     && ${VENV}/bin/python -m pip install --no-cache-dir sageattention \
     ' \
  && rm -f /tmp/requirements.no_torch.txt \
  && rm -rf /tmp/*
@@ -103,39 +99,33 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 WORKDIR /opt/ComfyUI
 EXPOSE 8188
 
-# Runtime environment:
-# - expose the venv first in PATH
-# - define ComfyUI listen/port/extra args
-# - tune ROCm/HIP visibility and allocator-related settings
+# Strix Halo / gfx1151 specific defaults.
 ENV PATH="/opt/venv/bin:${PATH}" \
     VIRTUAL_ENV=/opt/venv \
     PYTHONUNBUFFERED=1 \
-    TRITON_CACHE_DIR=/opt/venv/.cache/triton \
     COMFY_LISTEN=0.0.0.0 \
     COMFY_PORT=8188 \
-    COMFY_ARGS="" \
+    COMFY_ARGS="--force-fp16 --preview-method auto" \
+    PYTORCH_ALLOC_CONF=expandable_segments:True \
+    PYTORCH_HIP_ALLOC_CONF=expandable_segments:True \
     PYTORCH_SDP_DISABLE_FLASH=0 \
     PYTORCH_SDP_DISABLE_MEM_EFFICIENT=0 \
     PYTORCH_SDP_DISABLE_MATH=0 \
     XFORMERS_FORCE_DISABLE_TRITON=1 \
     TORCHDYNAMO_DISABLE=1 \
     TORCHINDUCTOR_DISABLE=1 \
-    PYTORCH_ALLOC_CONF=expandable_segments:True \
-    PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
+    TRITON_CACHE_DIR=/opt/venv/.cache/triton
 
-# Container startup sequence:
-# - create state directory for custom-node dependency hashes
-# - print torch/device diagnostics
-# - scan custom_nodes for requirements.txt
-# - install only filtered, changed dependencies
-# - exec ComfyUI with env-driven listen/port/extra args
 CMD ["/bin/sh", "-lc", "\
-mkdir -p /opt/ComfyUI/.startup-state && \
+mkdir -p /opt/ComfyUI/.startup-state /opt/venv/.cache/triton && \
 /opt/venv/bin/python - <<'PY'\n\
-import torch\n\
+import os, torch\n\
 print('torch=', torch.__version__)\n\
 print('hip=', getattr(torch.version, 'hip', None))\n\
 print('cuda.is_available=', torch.cuda.is_available())\n\
+print('HIP_VISIBLE_DEVICES=', os.environ.get('HIP_VISIBLE_DEVICES'))\n\
+print('ROCR_VISIBLE_DEVICES=', os.environ.get('ROCR_VISIBLE_DEVICES'))\n\
+print('HSA_OVERRIDE_GFX_VERSION=', os.environ.get('HSA_OVERRIDE_GFX_VERSION'))\n\
 if getattr(torch.version, 'hip', None) is not None and torch.cuda.is_available():\n\
   print('device=', torch.cuda.get_device_name(0))\n\
 PY\n\
@@ -147,16 +137,14 @@ find /opt/ComfyUI/custom_nodes -type f -name requirements.txt 2>/dev/null | whil
   hash_file=\"/opt/ComfyUI/.startup-state/${node_name}.requirements.sha256\"\n\
   current_hash=\"$(sha256sum \"$req\" | awk '{print $1}')\"\n\
   old_hash=''\n\
-  if [ -f \"$hash_file\" ]; then\n\
-    old_hash=\"$(cat \"$hash_file\" 2>/dev/null)\"\n\
-  fi\n\
+  if [ -f \"$hash_file\" ]; then old_hash=\"$(cat \"$hash_file\" 2>/dev/null)\"; fi\n\
   echo \"[startup] found: $req\"\n\
-  if echo \"$node_name\" | grep -qiE 'nvidia|cuda|cudnn|tensorrt|triton|vfx|amido'; then\n\
+  if echo \"$node_name\" | grep -qiE 'nvidia|cuda|cudnn|tensorrt|vfx|amido'; then\n\
     echo \"[startup] skip GPU-specific node: $node_name\"\n\
     echo \"$current_hash\" > \"$hash_file\"\n\
     continue\n\
   fi\n\
-  awk 'NF > 0 && $0 !~ /^[[:space:]]*#/ && $0 !~ /^(torch|torchvision|torchaudio)([<>=!~ ].*)?$/ && tolower($0) !~ /(nvidia|cuda|cudnn|tensorrt|triton|vfx|amido)/ {print}' \"$req\" > \"$filtered\"\n\
+  awk 'NF > 0 && $0 !~ /^[[:space:]]*#/ && $0 !~ /^(torch|torchvision|torchaudio)([<>=!~ ].*)?$/ && tolower($0) !~ /(nvidia|cuda|cudnn|tensorrt|vfx|amido)/ {print}' \"$req\" > \"$filtered\"\n\
   if [ ! -s \"$filtered\" ]; then\n\
     echo \"[startup] no installable deps after filtering for $node_name\"\n\
     echo \"$current_hash\" > \"$hash_file\"\n\
