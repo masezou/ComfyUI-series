@@ -22,7 +22,7 @@ ARG BUILDER_IMAGE=nvcr.io/nvidia/cuda:13.1.2-cudnn-devel-ubuntu24.04
 ARG RUNTIME_IMAGE=nvcr.io/nvidia/cuda:13.1.2-runtime-ubuntu24.04
 ARG PYTORCH_CUDA=cu130
 ARG COMFY_REF=master
-ARG COMFY_AIMDO_REF=v0.2.14
+ARG COMFY_AIMDO_REF=v0.3.0
 ARG COMFY_COMMIT=
 
 # ==================================================================
@@ -47,6 +47,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       git \
       python3 python3-venv \
       python3-dev build-essential \
+      cmake ninja-build pkg-config \
+      file \
     && rm -rf /var/lib/apt/lists/*
 
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
@@ -117,6 +119,18 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     python3 -m venv ${VENV} \
  && ${VENV}/bin/python -m ensurepip --upgrade \
  && ${VENV}/bin/python -m pip install -U pip setuptools wheel setuptools-scm
+
+# ------------------------------------------------------------------
+# Build funchook dependency for comfy-aimdo Linux function hooks
+# ------------------------------------------------------------------
+RUN git clone --depth 1 https://github.com/kubo/funchook.git /tmp/funchook \
+ && cmake -S /tmp/funchook -B /tmp/funchook/build -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+      -DFUNCHOOK_BUILD_TESTS=OFF \
+ && cmake --build /tmp/funchook/build \
+ && cmake --install /tmp/funchook/build \
+ && ldconfig
 
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     git clone https://github.com/Comfy-Org/comfy-aimdo.git /tmp/comfy-aimdo \
