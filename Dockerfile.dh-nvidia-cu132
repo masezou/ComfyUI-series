@@ -26,10 +26,10 @@
 
 ARG CUDA_VER=13.2.1
 ARG UBUNTU_VER=24.04
-ARG PYTORCH_CUDA=cu130
+ARG PYTORCH_CUDA=cu132
 ARG COMFY_REF=master
 ARG COMFY_COMMIT=
-ARG COMFY_AIMDO_REF=v0.2.14
+ARG COMFY_AIMDO_REF=v0.3.0
 
 # ------------------------------------------------------------------
 # Builder stage
@@ -149,6 +149,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       git \
       python3 python3-venv \
       python3-dev build-essential \
+      cmake ninja-build pkg-config \
       file \
     && rm -rf /var/lib/apt/lists/*
 
@@ -157,6 +158,18 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
  && ${VENV}/bin/python -m ensurepip --upgrade \
  && ${VENV}/bin/python -m pip install -U pip setuptools wheel setuptools-scm \
  && rm -rf /tmp/*
+
+# ------------------------------------------------------------------
+# Build funchook dependency for comfy-aimdo Linux function hooks
+# ------------------------------------------------------------------
+RUN git clone --depth 1 https://github.com/kubo/funchook.git /tmp/funchook \
+ && cmake -S /tmp/funchook -B /tmp/funchook/build -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+      -DFUNCHOOK_BUILD_TESTS=OFF \
+ && cmake --build /tmp/funchook/build \
+ && cmake --install /tmp/funchook/build \
+ && ldconfig
 
 RUN git clone https://github.com/Comfy-Org/comfy-aimdo.git /tmp/comfy-aimdo \
  && cd /tmp/comfy-aimdo \
@@ -173,10 +186,13 @@ RUN git clone https://github.com/Comfy-Org/comfy-aimdo.git /tmp/comfy-aimdo \
  && test -f "/usr/local/cuda/targets/${CUDA_TARGET}/lib/stubs/libcuda.so" \
  && gcc -shared -o comfy_aimdo/aimdo.so -fPIC \
       -I"./src" \
+      -I"/usr/local/include" \
       -I"/usr/local/cuda/targets/${CUDA_TARGET}/include" \
+      -L"/usr/local/lib" \
       -L"/usr/local/cuda/targets/${CUDA_TARGET}/lib/stubs" \
+      -Wl,-rpath,/usr/local/lib \
       -Wno-error \
-      src/*.c src-posix/*.c -lcuda \
+      src/*.c src-cuda/*.c src-posix/*.c -lfunchook -lcuda \
  && test -f comfy_aimdo/aimdo.so \
  && file comfy_aimdo/aimdo.so \
  && mkdir -p /tmp/wheels \
@@ -192,6 +208,9 @@ RUN git clone https://github.com/Comfy-Org/comfy-aimdo.git /tmp/comfy-aimdo \
 # runtime (final image)
 # =========================
 FROM nvidia/cuda:${CUDA_VER}-cudnn-runtime-ubuntu${UBUNTU_VER}
+
+COPY --from=build_aimdo /usr/local/lib/libfunchook.so* /usr/local/lib/
+RUN ldconfig
 
 ARG DEBIAN_FRONTEND=noninteractive
 
