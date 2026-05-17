@@ -59,8 +59,19 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     ${VENV}/bin/python -m pip install -U \
-      --index-url https://download.pytorch.org/whl/${PYTORCH_CUDA} \
-      torch torchvision torchaudio
+      --index-url "https://download.pytorch.org/whl/${PYTORCH_CUDA}" \
+      torch torchvision \
+ && if [ "${TARGETARCH}" = "amd64" ]; then \
+      ${VENV}/bin/python -m pip install -U \
+        --index-url "https://download.pytorch.org/whl/${PYTORCH_CUDA}" \
+        torchaudio; \
+    else \
+      ${VENV}/bin/python -m pip install -U \
+        --index-url "https://download.pytorch.org/whl/${PYTORCH_CUDA}" \
+        "torchaudio==2.12.0+${PYTORCH_CUDA}" || \
+      ${VENV}/bin/python -m pip install -U torchaudio --no-deps; \
+    fi
+
 
 RUN ${VENV}/bin/python - <<'PY2'
 import torch
