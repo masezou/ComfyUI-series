@@ -39,8 +39,8 @@ ARG COMFY_REF=master
 ARG COMFY_COMMIT=master
 
 # Pin versions for reproducibility
-ARG TORCH_VER=2.11.0
-ARG TV_VER=0.26.0
+ARG TORCH_VER=2.12.0
+ARG TV_VER=0.27.0
 ARG TA_VER=2.11.0
 
 # Environment for predictable, smaller installs
@@ -118,7 +118,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
       awk '"'"'NF > 0 && \
       $0 !~ /^[[:space:]]*#/ && \
       $0 !~ /^(torch|torchvision|torchaudio)([<>=!~ ].*)?$/ && \
-      tolower($0) !~ /(nvidia|cuda|cudnn|tensorrt|triton|vfx|amido)/ \
+      tolower($0) !~ /(nvidia|cuda|cudnn|tensorrt|triton|vfx)/ \
       {print}'"'"' requirements.txt > /tmp/requirements.no_torch.txt \
       && if [ -s /tmp/requirements.no_torch.txt ]; then \
            /opt/venv/bin/python -m pip install -U -r /tmp/requirements.no_torch.txt; \
@@ -224,12 +224,12 @@ find /opt/ComfyUI/custom_nodes -type f -name requirements.txt 2>/dev/null | whil
     old_hash=\"$(cat \"$hash_file\" 2>/dev/null)\"\n\
   fi\n\
   echo \"[startup] found: $req\"\n\
-  if echo \"$node_name\" | grep -qiE 'nvidia|cuda|cudnn|tensorrt|triton|vfx|amido'; then\n\
+  if echo \"$node_name\" | grep -qiE 'nvidia|cuda|cudnn|tensorrt|triton|vfx'; then\n\
     echo \"[startup] skip GPU-specific node: $node_name\"\n\
     echo \"$current_hash\" > \"$hash_file\"\n\
     continue\n\
   fi\n\
-  awk 'NF > 0 && $0 !~ /^[[:space:]]*#/ && $0 !~ /^(torch|torchvision|torchaudio)([<>=!~ ].*)?$/ && tolower($0) !~ /(nvidia|cuda|cudnn|tensorrt|triton|vfx|amido)/ {print}' \"$req\" > \"$filtered\"\n\
+  awk 'NF > 0 && $0 !~ /^[[:space:]]*#/ && $0 !~ /^(torch|torchvision|torchaudio)([<>=!~ ].*)?$/ && tolower($0) !~ /(nvidia|cuda|cudnn|tensorrt|triton|vfx)/ {print}' \"$req\" > \"$filtered\"\n\
   if [ ! -s \"$filtered\" ]; then\n\
     echo \"[startup] no installable deps after filtering for $node_name\"\n\
     echo \"$current_hash\" > \"$hash_file\"\n\
